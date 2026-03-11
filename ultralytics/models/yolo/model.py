@@ -20,6 +20,56 @@ from ultralytics.nn.tasks import (
     YOLOEModel,
     YOLOESegModel,
 )
+
+
+class YOLODA(Model):
+    """YOLO Domain Adaptation (YOLODA) object detection model.
+
+    YOLODA is a YOLO model designed for domain adaptation tasks using gradient reversal layer (GRL).
+    It extends the standard YOLO detection model to support training on source domain and adaptation
+    to target domain with different characteristics (e.g., weather conditions).
+
+    Attributes:
+        model: The loaded YOLODA model instance.
+        task: Always set to 'detect' for object detection.
+        overrides: Configuration overrides for the model.
+
+    Methods:
+        __init__: Initialize YOLODA model with a configuration file or pre-trained model.
+        task_map: Map tasks to their corresponding model, trainer, validator, and predictor classes.
+
+    Examples:
+        Load a YOLODA model from YAML configuration
+        >>> model = YOLODA("yolodan.yaml")
+
+        Train the model
+        >>> model.train(data="coco8.yaml", epochs=100)
+
+        Validate the model
+        >>> model.val(data="coco8.yaml")
+    """
+
+    def __init__(self, model: str | Path = "yolodan.yaml", verbose: bool = False) -> None:
+        """Initialize YOLODA model with a configuration file or pre-trained model.
+
+        Args:
+            model (str | Path): Path to the model configuration file (*.yaml) or pre-trained weights (*.pt).
+            verbose (bool): If True, prints additional information during initialization.
+        """
+        super().__init__(model=model, task="detect", verbose=verbose)
+
+    @property
+    def task_map(self) -> dict[str, dict[str, Any]]:
+        """Map head to model, trainer, validator, and predictor classes."""
+        return {
+            "detect": {
+                "model": DetectionModel,
+                "trainer": yolo.domain_adapt.DomainAdaptationTrainer,
+                "validator": yolo.domain_adapt.DomainAdaptationValidator,
+                "predictor": yolo.domain_adapt.DomainAdaptationPredictor,
+            }
+        }
+        
 from ultralytics.utils import ROOT, YAML
 
 

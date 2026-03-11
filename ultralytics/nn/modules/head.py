@@ -20,7 +20,7 @@ from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect"
+__all__ = "DetectGRL", "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect"
 
 
 class Detect(nn.Module):
@@ -249,6 +249,50 @@ class Detect(nn.Module):
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
+
+
+class DetectGRL(Detect):
+    """YOLO Detect head with Gradient Reversal Layer (GRL) for Domain Adaptation.
+
+    This class extends the standard Detect head to support domain adaptation through gradient reversal.
+    Currently, the implementation is identical to Detect, but provides a foundation for future GRL integration.
+
+    Attributes:
+        dynamic (bool): Force grid reconstruction.
+        export (bool): Export mode flag.
+        format (str): Export format.
+        end2end (bool): End-to-end detection mode.
+        max_det (int): Maximum detections per image.
+        shape (tuple): Input shape.
+        anchors (torch.Tensor): Anchor points.
+        strides (torch.Tensor): Feature map strides.
+        legacy (bool): Backward compatibility for v3/v5/v8/v9/v11 models.
+        xyxy (bool): Output format, xyxy or xywh.
+        nc (int): Number of classes.
+        nl (int): Number of detection layers.
+        reg_max (int): DFL channels.
+        no (int): Number of outputs per anchor.
+        stride (torch.Tensor): Strides computed during build.
+        cv2 (nn.ModuleList): Convolution layers for box regression.
+        cv3 (nn.ModuleList): Convolution layers for classification.
+        dfl (nn.Module): Distribution Focal Loss layer.
+        one2one_cv2 (nn.ModuleList): One-to-one convolution layers for box regression.
+        one2one_cv3 (nn.ModuleList): One-to-one convolution layers for classification.
+
+    Methods:
+        forward: Perform forward pass and return predictions.
+        bias_init: Initialize detection head biases.
+        decode_bboxes: Decode bounding boxes from predictions.
+        postprocess: Post-process model predictions.
+
+    Examples:
+        Create a detection head with GRL support for 80 classes
+        >>> detect_grl = DetectGRL(nc=80, ch=(256, 512, 1024))
+        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
+        >>> outputs = detect_grl(x)
+    """
+
+    pass  # Currently identical to Detect, foundation for future GRL implementation
 
 
 class Segment(Detect):
