@@ -121,6 +121,10 @@ class YOLO(Model):
             new_instance = YOLOE(path, task=task, verbose=verbose)
             self.__class__ = type(new_instance)
             self.__dict__ = new_instance.__dict__
+        elif "-da" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:  # if YOLODA model
+            new_instance = YOLODA(path, verbose=verbose)
+            self.__class__ = type(new_instance)
+            self.__dict__ = new_instance.__dict__
         else:
             # Continue with default YOLO initialization
             super().__init__(model=model, task=task, verbose=verbose)

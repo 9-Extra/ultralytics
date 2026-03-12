@@ -252,47 +252,113 @@ class Detect(nn.Module):
 
 
 class DetectGRL(Detect):
-    """YOLO Detect head with Gradient Reversal Layer (GRL) for Domain Adaptation.
+    """带有梯度反转层(GRL)的YOLO检测头，用于域自适应。
 
-    This class extends the standard Detect head to support domain adaptation through gradient reversal.
-    Currently, the implementation is identical to Detect, but provides a foundation for future GRL integration.
+    该类扩展了标准Detect检测头，通过梯度反转支持域自适应。
+    添加了一个域分类器，用于预测输入图像属于源域(0)还是目标域(1)。
+    域分类器仅在训练时工作。
 
     Attributes:
-        dynamic (bool): Force grid reconstruction.
-        export (bool): Export mode flag.
-        format (str): Export format.
-        end2end (bool): End-to-end detection mode.
-        max_det (int): Maximum detections per image.
-        shape (tuple): Input shape.
-        anchors (torch.Tensor): Anchor points.
-        strides (torch.Tensor): Feature map strides.
-        legacy (bool): Backward compatibility for v3/v5/v8/v9/v11 models.
-        xyxy (bool): Output format, xyxy or xywh.
-        nc (int): Number of classes.
-        nl (int): Number of detection layers.
-        reg_max (int): DFL channels.
-        no (int): Number of outputs per anchor.
-        stride (torch.Tensor): Strides computed during build.
-        cv2 (nn.ModuleList): Convolution layers for box regression.
-        cv3 (nn.ModuleList): Convolution layers for classification.
-        dfl (nn.Module): Distribution Focal Loss layer.
-        one2one_cv2 (nn.ModuleList): One-to-one convolution layers for box regression.
-        one2one_cv3 (nn.ModuleList): One-to-one convolution layers for classification.
+        dynamic (bool): 强制重建网格。
+        export (bool): 导出模式标志。
+        format (str): 导出格式。
+        end2end (bool): 端到端检测模式。
+        max_det (int): 每张图像的最大检测数。
+        shape (tuple): 输入形状。
+        anchors (torch.Tensor): 锚点。
+        strides (torch.Tensor): 特征图步长。
+        legacy (bool): v3/v5/v8/v9/v11模型的向后兼容性。
+        xyxy (bool): 输出格式，xyxy或xywh。
+        nc (int): 类别数量。
+        nl (int): 检测层数量。
+        reg_max (int): DFL通道数。
+        no (int): 每个锚点的输出数量。
+        stride (torch.Tensor): 构建时计算的步长。
+        cv2 (nn.ModuleList): 边界框回归的卷积层。
+        cv3 (nn.ModuleList): 分类的卷积层。
+        dfl (nn.Module): 分布焦点损失层。
+        one2one_cv2 (nn.ModuleList): 一对一边界框回归的卷积层。
+        one2one_cv3 (nn.ModuleList): 一对一分组的卷积层。
+        domain_cls (nn.ModuleList): 每层域分类的卷积层。
+        domain_fusion (nn.Conv2d): 1x1卷积，用于融合所有层的域特征。
 
     Methods:
-        forward: Perform forward pass and return predictions.
-        bias_init: Initialize detection head biases.
-        decode_bboxes: Decode bounding boxes from predictions.
-        postprocess: Post-process model predictions.
-
-    Examples:
-        Create a detection head with GRL support for 80 classes
-        >>> detect_grl = DetectGRL(nc=80, ch=(256, 512, 1024))
-        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
-        >>> outputs = detect_grl(x)
+        forward: 执行前向传播并返回带有域分类的预测结果。
+        bias_init: 初始化检测头偏置。
+        decode_bboxes: 从预测结果解码边界框。
+        postprocess: 后处理模型预测结果。
     """
+    
+    def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
+        assert end2end, "只考虑端到端模式"
+        assert reg_max == 1, "不使用DFL"
+        super().__init__(nc, reg_max, end2end, ch)
+        
+        # 域分类器：对每层应用3次卷积（3x3, 3x3, 1x1，输出16通道）
+        c_dom = max(ch[0] // 4, 16)  # 中间层通道数
+        self.domain_cls = nn.ModuleList(
+            nn.Sequential(
+                Conv(x, c_dom, 3),           # 3x3卷积
+                Conv(c_dom, c_dom, 3),       # 3x3卷积
+                Conv(c_dom, 16, 1),          # 1x1卷积，输出16通道
+            )
+            for x in ch
+        )
+        
+        # 融合层：1x1卷积，用于融合所有层的特征
+        # 输入通道总数 = 16 * 层数，输出 = 1（二分类）
+        self.domain_fusion = nn.Conv2d(16 * self.nl, 1, 1)
 
-    pass  # Currently identical to Detect, foundation for future GRL implementation
+    def predict_domain(self, x: list[torch.Tensor]) -> torch.Tensor | None:
+        """预测图像属于源域还是目标域，输出形状为[batch_size]的向量，规定源域为0，目标域为1"""
+        if self.domain_cls is None or self.domain_fusion is None:
+            return None # for fuse
+        
+        domain_preds = []
+        for i in range(self.nl):
+            dom_feat = self.domain_cls[i](x[i])  # (bs, 16, h, w)
+            # 全局平均池化，得到 (bs, 16, 1, 1)
+            dom_feat = F.adaptive_avg_pool2d(dom_feat, 1)
+            domain_preds.append(dom_feat)
+        
+        # 拼接所有层： (bs, 16 * nl, 1, 1)
+        domain_feat = torch.cat(domain_preds, dim=1)
+        
+        # 1x1卷积融合： (bs, 1, 1, 1)
+        domain_out = self.domain_fusion(domain_feat)
+        
+        # 重塑为 (bs,) - batch_size大小的一维向量
+        domain_out = domain_out.view(-1)
+        return domain_out
+        
+        
+    def forward(
+        self, x: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """拼接并返回预测的边界框、类别概率和域预测结果。"""
+        preds = self.forward_head(x, **self.one2many)
+            
+        if self.end2end:
+            x_detach = [xi.detach() for xi in x]
+            one2one = self.forward_head(x_detach, **self.one2one)
+            preds = {"one2many": preds, "one2one": one2one}
+            
+        # 将域预测添加到preds字典中
+        preds["domain_pred"] = self.predict_domain(x)
+        
+        if self.training:
+            return preds
+        
+        y = self._inference(preds["one2one"] if self.end2end else preds)
+        if self.end2end:
+            y = self.postprocess(y.permute(0, 2, 1))
+        return y if self.export else (y, preds)
+    
+    def fuse(self) -> None:
+        """移除域预测头"""
+        super().fuse()
+        self.domain_cls = None
+        self.domain_fusion = None
 
 
 class Segment(Detect):

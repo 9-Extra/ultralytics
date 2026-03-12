@@ -1749,6 +1749,9 @@ def yaml_model_load(path):
         path = path.with_name(new_stem + path.suffix)
 
     unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolov8x.yaml -> yolov8.yaml
+    # Support domain adaptation models like yolo26n-da.yaml -> yolo26-da.yaml
+    if not unified_path or unified_path == str(path):
+        unified_path = re.sub(r"(\d+)([nslmx])(-.+)?$", r"\1\3", str(path))  # i.e. yolo26n-da.yaml -> yolo26-da.yaml
     yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
     d = YAML.load(yaml_file)  # model dict
     d["scale"] = guess_model_scale(path)
@@ -1766,7 +1769,9 @@ def guess_model_scale(model_path):
         (str): The size character of the model's scale (n, s, m, l, or x), or empty string if not found.
     """
     try:
-        return re.search(r"yolo(e-)?[v]?\d+([nslmx])", Path(model_path).stem).group(2)
+        # Support domain adaptation models like yolo26n-da.yaml
+        match = re.search(r"yolo(e-)?[v]?\d+([nslmx])", Path(model_path).stem)
+        return match.group(2) if match else ""
     except AttributeError:
         return ""
 
