@@ -289,6 +289,8 @@ class DetectGRL(Detect):
         postprocess: 后处理模型预测结果。
     """
     
+    domain_classify_only: bool # 只进行域分类，训练时可以节省一些开销
+    
     def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
         assert end2end, "只考虑端到端模式"
         assert reg_max == 1, "不使用DFL"
@@ -308,7 +310,8 @@ class DetectGRL(Detect):
         # 融合层：1x1卷积，用于融合所有层的特征
         # 输入通道总数 = 16 * 层数，输出 = 1（二分类）
         self.domain_fusion = nn.Conv2d(16 * self.nl, 1, 1)
-
+        self.domain_classify_only = False
+        
     def predict_domain(self, x: list[torch.Tensor]) -> torch.Tensor | None:
         """预测图像属于源域还是目标域，输出形状为[batch_size]的向量，规定源域为0，目标域为1"""
         if self.domain_cls is None or self.domain_fusion is None:
@@ -336,6 +339,10 @@ class DetectGRL(Detect):
         self, x: list[torch.Tensor]
     ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """拼接并返回预测的边界框、类别概率和域预测结果。"""
+        if self.domain_classify_only: # short cut
+            preds = dict(domain_pred=self.predict_domain(x))
+            return preds
+        
         preds = self.forward_head(x, **self.one2many)
             
         if self.end2end:
