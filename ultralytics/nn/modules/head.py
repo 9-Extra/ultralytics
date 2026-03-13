@@ -289,6 +289,29 @@ class DetectGRL(Detect):
         postprocess: 后处理模型预测结果。
     """
     
+    class GradientScalarFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, input: torch.Tensor, weight: float) -> torch.Tensor:
+            ctx.weight = weight
+            return input.view_as(input)
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            grad_input = grad_output * ctx.weight
+            return grad_input, None
+    
+    # 梯度反转层
+    class GradientScalarLayer(torch.nn.Module):
+        def __init__(self, weight: float = -1):
+            super().__init__()
+            self.weight = weight
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            return DetectGRL.GradientScalarFunction.apply(input, self.weight)
+
+        
+
+    
     domain_classify_only: bool # 只进行域分类，训练时可以节省一些开销
     
     def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
@@ -300,6 +323,7 @@ class DetectGRL(Detect):
         c_dom = max(ch[0] // 4, 16)  # 中间层通道数
         self.domain_cls = nn.ModuleList(
             nn.Sequential(
+                DetectGRL.GradientScalarLayer(),  # 梯度反转层
                 Conv(x, c_dom, 3),           # 3x3卷积
                 Conv(c_dom, c_dom, 3),       # 3x3卷积
                 Conv(c_dom, 16, 1),          # 1x1卷积，输出16通道
@@ -333,7 +357,6 @@ class DetectGRL(Detect):
         # 重塑为 (bs,) - batch_size大小的一维向量
         domain_out = domain_out.view(-1)
         return domain_out
-        
         
     def forward(
         self, x: list[torch.Tensor]

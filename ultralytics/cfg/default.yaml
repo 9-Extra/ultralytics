@@ -9,6 +9,7 @@ mode: train # (str) YOLO mode, i.e. train, val, predict, export, track, benchmar
 # Train settings -------------------------------------------------------------------------------------------------------
 model: # (str, optional) path to model file, i.e. yolov8n.pt or yolov8n.yaml
 data: # (str, optional) path to data file, i.e. coco8.yaml
+target_data: # (str, optional) 目标域数据集
 epochs: 100 # (int) number of epochs to train for
 time: # (float, optional) max hours to train; overrides epochs if set
 patience: 100 # (int) early stop after N epochs without val improvement

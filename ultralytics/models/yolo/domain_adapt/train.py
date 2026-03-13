@@ -67,8 +67,6 @@ class DomainAdaptationTrainer(BaseTrainer):
             overrides (dict, optional): 配置覆盖字典，可包含 target_data 指定目标域数据集路径。
             _callbacks (list, optional): 回调函数列表。
         """
-        # 从 overrides 中提取目标域数据路径
-        self.target_data_path = overrides.pop("target_data", None) if overrides else None
         super().__init__(cfg, overrides, _callbacks)
 
     def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None, data: dict | None = None):
@@ -122,9 +120,9 @@ class DomainAdaptationTrainer(BaseTrainer):
             data["nc"] = 1
         
         # 如果指定了目标域数据路径，加载目标域数据集
-        if self.target_data_path:
-            self.target_data = check_det_dataset(self.target_data_path)
-            LOGGER.info(f"目标域数据集加载完成: {self.target_data_path}")
+        if self.args.target_data:
+            self.target_data = check_det_dataset(self.args.target_data)
+            LOGGER.info(f"目标域数据集加载完成: {self.args.target_data}")
         else:
             self.target_data = None
             
@@ -398,58 +396,42 @@ class DomainAdaptationTrainer(BaseTrainer):
                             x["momentum"] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
 
                 # Forward
-                try:
-                    with autocast(self.amp):
-                        batch = self.preprocess_batch(batch)
-                        
-                        preds = self.model(batch["img"])
-                        if self.args.compile:
-                            # Decouple inference and loss calculations for improved compile performance
-                            loss, self.loss_items = unwrap_model(self.model).loss(batch, preds)
-                        else:
-                            loss, self.loss_items = self.model.loss(batch, preds)
+            
+                with autocast(self.amp):
+                    batch = self.preprocess_batch(batch)
+                    
+                    preds = self.model(batch["img"])
+                    if self.args.compile:
+                        # Decouple inference and loss calculations for improved compile performance
+                        loss, self.loss_items = unwrap_model(self.model).loss(batch, preds)
+                    else:
+                        loss, self.loss_items = self.model.loss(batch, preds)
 
-                        loss = loss.sum() # original_yolo_loss
-                        
-                        origin_domain_preds = preds["domain_pred"]
-                        unwrap_model(self.model).model[-1].domain_classify_only = True
-                        target_domain_preds = self.model(batch["domain_img"])["domain_pred"]
-                        unwrap_model(self.model).model[-1].domain_classify_only = False
-                        od_loss = torch.nn.functional.binary_cross_entropy_with_logits(origin_domain_preds, torch.zeros_like(origin_domain_preds), reduction="sum")
-                        td_loss: torch.Tensor = torch.nn.functional.binary_cross_entropy_with_logits(target_domain_preds, torch.ones_like(target_domain_preds), reduction="sum")
-                        domain_loss_weight = getattr(self.args, "domain_loss_weight", 0.1)
-                        domain_loss = (od_loss + td_loss) * domain_loss_weight
-                        loss += domain_loss
-                        self.loss_items += domain_loss.detach()
-                        
-                        self.loss = loss
-                        
-                        if RANK != -1:
-                            self.loss *= self.world_size
-                        self.tloss = (
-                            self.loss_items if self.tloss is None else (self.tloss * i + self.loss_items) / (i + 1)
-                        )
-
-                    # Backward
-                    self.scaler.scale(self.loss).backward()
-                except torch.cuda.OutOfMemoryError:
-                    if epoch > self.start_epoch or self._oom_retries >= 3 or RANK != -1:
-                        raise  # only auto-reduce during first epoch on single GPU, max 3 retries
-                    self._oom_retries += 1
-                    old_batch = self.batch_size
-                    self.args.batch = self.batch_size = max(self.batch_size // 2, 1)
-                    LOGGER.warning(
-                        f"CUDA out of memory with batch={old_batch}. "
-                        f"Reducing to batch={self.batch_size} and retrying ({self._oom_retries}/3)."
+                    loss = loss.sum() # original_yolo_loss
+                    
+                    origin_domain_preds = preds["domain_pred"]
+                    unwrap_model(self.model).model[-1].domain_classify_only = True
+                    target_domain_preds = self.model(batch["domain_img"])["domain_pred"]
+                    unwrap_model(self.model).model[-1].domain_classify_only = False
+                    od_loss = torch.nn.functional.binary_cross_entropy_with_logits(origin_domain_preds, torch.zeros_like(origin_domain_preds), reduction="sum")
+                    td_loss: torch.Tensor = torch.nn.functional.binary_cross_entropy_with_logits(target_domain_preds, torch.ones_like(target_domain_preds), reduction="sum")
+                    domain_loss_weight = getattr(self.args, "domain_loss_weight", 0.1)
+                    domain_loss = (od_loss + td_loss) * domain_loss_weight
+                    loss += domain_loss
+                    self.loss_items += domain_loss.detach()
+                    
+                    self.loss = loss
+                    
+                    if RANK != -1:
+                        self.loss *= self.world_size
+                    self.tloss = (
+                        self.loss_items if self.tloss is None else (self.tloss * i + self.loss_items) / (i + 1)
                     )
-                    self._clear_memory()
-                    self._build_train_pipeline()  # rebuild dataloaders, optimizer, scheduler
-                    self.scheduler.last_epoch = self.start_epoch - 1
-                    nb = len(self.train_loader)
-                    nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1
-                    last_opt_step = -1
-                    self.optimizer.zero_grad()
-                    break  # restart epoch loop with reduced batch size
+                pass
+
+                # Backward
+                self.scaler.scale(self.loss).backward()    
+                    
                 if ni - last_opt_step >= self.accumulate:
                     self.optimizer_step()
                     last_opt_step = ni

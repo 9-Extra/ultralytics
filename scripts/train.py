@@ -23,8 +23,8 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default="yolo26l-da.yaml",
-        help="模型配置文件路径 (默认: yolo26l-da.yaml)",
+        default="yolo26n-da.yaml",
+        help="模型配置文件路径 (默认: yolo26n-da.yaml)",
     )
     parser.add_argument(
         "--weights", type=str, default=None, help="预训练权重文件路径 (可选)"
@@ -46,7 +46,7 @@ def parse_args():
 
     # 训练超参数
     parser.add_argument("--epochs", type=int, default=100, help="训练轮数 (默认: 100)")
-    parser.add_argument("--batch", type=int, default=4, help="批次大小 (默认: 4)")
+    parser.add_argument("--batch", type=int, default=16, help="批次大小 (默认: 16)")
     parser.add_argument(
         "--imgsz", type=int, default=640, help="输入图像尺寸 (默认: 640)"
     )
@@ -74,7 +74,7 @@ def parse_args():
         "--project", type=str, default="", help="项目保存路径 (默认: " ")"
     )
     parser.add_argument(
-        "--name", type=str, default="yolo26l-da", help="实验名称 (默认: yolo26l-da)"
+        "--name", type=str, default="yolo-da", help="实验名称 (默认: yolo-da)"
     )
     parser.add_argument(
         "--patience", type=int, default=50, help="早停耐心值 (默认: 50)"
@@ -152,7 +152,7 @@ def main():
         patience=args.patience,
         save_period=args.save_period,
         amp=True,
-        compile=True,
+        compile=False,
         cache="disk"
     )
 
