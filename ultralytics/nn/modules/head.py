@@ -309,8 +309,6 @@ class DetectGRL(Detect):
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return DetectGRL.GradientScalarFunction.apply(input, self.weight)
 
-        
-
     
     domain_classify_only: bool # 只进行域分类，训练时可以节省一些开销
     
