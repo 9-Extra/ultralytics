@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -13,47 +14,27 @@ import torch.distributed as dist
 from ultralytics.data import build_dataloader, build_yolo_dataset, converter
 from ultralytics.engine.validator import BaseValidator
 from ultralytics.utils import LOGGER, RANK, nms, ops
-from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
 from ultralytics.utils.plotting import plot_images
+from ultralytics.data.utils import check_cls_dataset, check_det_dataset
+from ultralytics.nn.autobackend import AutoBackend
+from ultralytics.utils import LOGGER, RANK, TQDM, callbacks, colorstr, emojis
+from ultralytics.utils.checks import check_imgsz
+from ultralytics.utils.ops import Profile
+from ultralytics.utils.torch_utils import attempt_compile, select_device, smart_inference_mode, unwrap_model
+
 
 
 class DomainAdaptationValidator(BaseValidator):
-    """A class extending the BaseValidator class for validation based on a domain adaptation detection model.
-
-    This class implements validation functionality specific to object detection tasks with domain adaptation,
-    including metrics calculation, prediction processing, and visualization of results.
-    It supports simultaneous validation on both source domain and target domain datasets.
-
-    Attributes:
-        is_coco (bool): Whether the dataset is COCO.
-        is_lvis (bool): Whether the dataset is LVIS.
-        class_map (list[int]): Mapping from model class indices to dataset class indices.
-        metrics (DetMetrics): Object detection metrics calculator.
-        iouv (torch.Tensor): IoU thresholds for mAP calculation.
-        niou (int): Number of IoU thresholds.
-        lb (list[Any]): List for storing ground truth labels for hybrid saving.
-        jdict (list[dict[str, Any]]): List for storing JSON detection results.
-        stats (dict[str, list[torch.Tensor]]): Dictionary for storing statistics during validation.
-        target_data (dict): Target domain dataset information dictionary.
-        target_dataloader (DataLoader): Target domain validation data loader.
-        target_metrics (DetMetrics): Target domain metrics calculator.
-
-    Examples:
-        >>> from ultralytics.models.yolo.domain_adapt import DomainAdaptationValidator
-        >>> args = dict(model="yolodan.pt", data="source_coco8.yaml", target_data="target_cityscapes.yaml")
-        >>> validator = DomainAdaptationValidator(args=args)
-        >>> validator()
-    """
-
-    def __init__(self, dataloader=None, save_dir=None, args=None, _callbacks=None) -> None:
-        """Initialize domain adaptation validator with necessary variables and settings.
+    def __init__(self, dataloader=None, save_dir=None, args=None, _callbacks=None, target_dataloader=None) -> None:
+        """Initialize detection validator with necessary variables and settings.
 
         Args:
             dataloader (torch.utils.data.DataLoader, optional): DataLoader to use for validation.
             save_dir (Path, optional): Directory to save results.
-            args (dict[str, Any], optional): Arguments for the validator. Can contain 'target_data' for target domain.
+            args (dict[str, Any], optional): Arguments for the validator.
             _callbacks (list[Any], optional): List of callback functions.
+            target_dataloader (torch.utils.data.DataLoader, optional): Target domain DataLoader for validation.
         """
         super().__init__(dataloader, save_dir, args, _callbacks)
         self.is_coco = False
@@ -63,12 +44,234 @@ class DomainAdaptationValidator(BaseValidator):
         self.iouv = torch.linspace(0.5, 0.95, 10)  # IoU vector for mAP@0.5:0.95
         self.niou = self.iouv.numel()
         self.metrics = DetMetrics()
+        self.target_dataloader = target_dataloader
+        self.target_metrics = DetMetrics() if target_dataloader is not None else None
+    
+    def _setup_model(self, trainer=None, model=None):
+        """Setup model for validation.
         
-        # Target domain attributes
-        self.target_data_path = getattr(self.args, "target_data", None)
-        self.target_data = None
-        self.target_dataloader = None
-        self.target_metrics = None
+        Args:
+            trainer (object, optional): Trainer object that contains the model to validate.
+            model (nn.Module, optional): Model to validate if not using a trainer.
+            
+        Returns:
+            tuple: (model, augment) - The prepared model and augment flag.
+        """
+        augment = self.args.augment and (trainer is None)
+        
+        if trainer is not None:
+            self.device = trainer.device
+            self.data = trainer.data
+            # Force FP16 val during training
+            self.args.half = self.device.type != "cpu" and trainer.amp
+            model = trainer.ema.ema or trainer.model
+            if trainer.args.compile and hasattr(model, "_orig_mod"):
+                model = model._orig_mod  # validate non-compiled original model to avoid issues
+            model = model.half() if self.args.half else model.float()
+            self.loss = torch.zeros_like(trainer.loss_items, device=trainer.device)
+            self.args.plots &= trainer.stopper.possible_stop or (trainer.epoch == trainer.epochs - 1)
+            model.eval()
+        else:
+            if str(self.args.model).endswith(".yaml") and model is None:
+                LOGGER.warning("validating an untrained model YAML will result in 0 mAP.")
+            callbacks.add_integration_callbacks(self)
+            if hasattr(model, "end2end"):
+                if self.args.end2end is not None:
+                    model.end2end = self.args.end2end
+                if model.end2end:
+                    model.set_head_attr(max_det=self.args.max_det, agnostic_nms=self.args.agnostic_nms)
+            model = AutoBackend(
+                model=model or self.args.model,
+                device=select_device(self.args.device) if RANK == -1 else torch.device("cuda", RANK),
+                dnn=self.args.dnn,
+                data=self.args.data,
+                fp16=self.args.half,
+            )
+            self.device = model.device  # update device
+            self.args.half = model.fp16  # update half
+            stride, pt, jit = model.stride, model.pt, model.jit
+            imgsz = check_imgsz(self.args.imgsz, stride=stride)
+            if not (pt or jit or getattr(model, "dynamic", False)):
+                self.args.batch = model.metadata.get("batch", 1)  # export.py models default to batch-size 1
+                LOGGER.info(f"Setting batch={self.args.batch} input of shape ({self.args.batch}, 3, {imgsz}, {imgsz})")
+
+            if str(self.args.data).rsplit(".", 1)[-1] in {"yaml", "yml"}:
+                self.data = check_det_dataset(self.args.data)
+            elif self.args.task == "classify":
+                self.data = check_cls_dataset(self.args.data, split=self.args.split)
+            else:
+                raise FileNotFoundError(emojis(f"Dataset '{self.args.data}' for task={self.args.task} not found ❌"))
+
+            if self.device.type in {"cpu", "mps"}:
+                self.args.workers = 0  # faster CPU val as time dominated by inference, not dataloading
+            if not (pt or (getattr(model, "dynamic", False) and not model.imx)):
+                self.args.rect = False
+            self.stride = model.stride  # used in get_dataloader() for padding
+            self.dataloader = self.dataloader or self.get_dataloader(self.data.get(self.args.split), self.args.batch)
+
+            model.eval()
+            if self.args.compile:
+                model = attempt_compile(model, device=self.device)
+            model.warmup(imgsz=(1 if pt else self.args.batch, self.data["channels"], imgsz, imgsz))  # warmup
+            
+        return model, augment
+
+    def _validate_dataloader(self, dataloader, model, augment, desc_suffix=""):
+        """Run validation on a specific dataloader.
+        
+        Args:
+            dataloader (DataLoader): DataLoader to validate.
+            model (nn.Module): Model to use for validation.
+            augment (bool): Whether to use augmentation.
+            desc_suffix (str): Suffix to add to progress bar description.
+            
+        Returns:
+            tuple: (dt, stats) - Profiling timers and validation statistics.
+        """
+        dt = (
+            Profile(device=self.device),
+            Profile(device=self.device),
+            Profile(device=self.device),
+            Profile(device=self.device),
+        )
+        
+        # Reset metrics and jdict for this validation run
+        if desc_suffix == " (target)":
+            self.target_metrics = DetMetrics()
+            self.target_jdict = []
+        else:
+            self.jdict = []
+        
+        bar = TQDM(dataloader, desc=self.get_desc() + desc_suffix, total=len(dataloader))
+        for batch_i, batch in enumerate(bar):
+            self.run_callbacks("on_val_batch_start")
+            self.batch_i = batch_i
+            # Preprocess
+            with dt[0]:
+                batch = self.preprocess(batch)
+
+            # Inference
+            with dt[1]:
+                preds = model(batch["img"], augment=augment)
+
+            # Loss
+            with dt[2]:
+                if self.training and desc_suffix == "":
+                    self.loss += model.loss(batch, preds)[1]
+
+            # Postprocess
+            with dt[3]:
+                preds = self.postprocess(preds)
+
+            self.update_metrics(preds, batch, is_target=(desc_suffix != ""))
+            if self.args.plots and batch_i < 3 and RANK in {-1, 0}:
+                if desc_suffix == "":
+                    self.plot_val_samples(batch, batch_i)
+                    self.plot_predictions(batch, preds, batch_i)
+
+            self.run_callbacks("on_val_batch_end")
+            
+        return dt
+
+    @smart_inference_mode()
+    def __call__(self, trainer=None, model=None):
+        """Execute validation process, running inference on dataloader and computing performance metrics.
+
+        Args:
+            trainer (object, optional): Trainer object that contains the model to validate.
+            model (nn.Module, optional): Model to validate if not using a trainer.
+
+        Returns:
+            (dict): Dictionary containing validation statistics.
+        """
+        self.training = trainer is not None
+        
+        # Setup model
+        model, augment = self._setup_model(trainer, model)
+        
+        self.run_callbacks("on_val_start")
+        
+        # Initialize metrics
+        self.init_metrics(unwrap_model(model))
+        
+        # Validate on source domain
+        dt_source = self._validate_dataloader(self.dataloader, model, augment, desc_suffix="")
+        
+        # Validate on target domain if available
+        if self.target_dataloader is not None and len(self.target_dataloader) > 0:
+            dt_target = self._validate_dataloader(self.target_dataloader, model, augment, desc_suffix=" (target)")
+        else:
+            dt_target = None
+
+        # Gather and process source domain stats
+        stats_source = {}
+        self.gather_stats(is_target=False)
+        
+        # Gather and process target domain stats
+        if dt_target is not None:
+            self.gather_stats(is_target=True)
+        
+        if RANK in {-1, 0}:
+            # Source domain results
+            stats_source = self.get_stats(is_target=False)
+            self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt_source)))
+            self.finalize_metrics(is_target=False)
+            LOGGER.info("\n" + "=" * 60)
+            LOGGER.info("Source Domain Validation Results:")
+            self.print_results(is_target=False)
+            
+            # Target domain results
+            if dt_target is not None:
+                LOGGER.info("\n" + "-" * 60)
+                LOGGER.info("Target Domain Validation Results:")
+                self.target_speed = dict(zip(self.speed.keys(), (x.t / len(self.target_dataloader.dataset) * 1e3 for x in dt_target)))
+                _ = self.get_stats(is_target=True)  # Compute stats for target domain
+                self.finalize_metrics(is_target=True)
+                self.print_results(is_target=True)
+            
+            LOGGER.info("=" * 60 + "\n")
+            self.run_callbacks("on_val_end")
+
+        if self.training:
+            model.float()
+            # Reduce loss across all GPUs
+            loss = self.loss.clone().detach()
+            if trainer.world_size > 1:
+                dist.reduce(loss, dst=0, op=dist.ReduceOp.AVG)
+            if RANK > 0:
+                return
+            results = {**stats_source, **trainer.label_loss_items(loss.cpu() / len(self.dataloader), prefix="val")}
+            
+            # Add target domain metrics if available
+            if dt_target is not None and self.target_metrics is not None:
+                target_results = self.target_metrics.results_dict
+                for k, v in target_results.items():
+                    results[f"target_{k}"] = round(float(v), 5)
+            
+            return {k: round(float(v), 5) for k, v in results.items()}  # return results as 5 decimal place floats
+        else:
+            if RANK > 0:
+                return stats_source
+            LOGGER.info(
+                "Speed: {:.1f}ms preprocess, {:.1f}ms inference, {:.1f}ms loss, {:.1f}ms postprocess per image".format(
+                    *tuple(self.speed.values())
+                )
+            )
+            if dt_target is not None:
+                LOGGER.info(
+                    "Target Speed: {:.1f}ms preprocess, {:.1f}ms inference, {:.1f}ms loss, {:.1f}ms postprocess per image".format(
+                        *tuple(self.target_speed.values())
+                    )
+                )
+            if self.args.save_json and self.jdict:
+                with open(str(self.save_dir / "predictions.json"), "w", encoding="utf-8") as f:
+                    LOGGER.info(f"Saving {f.name}...")
+                    json.dump(self.jdict, f)  # flatten and save
+                stats_source = self.eval_json(stats_source)  # update stats
+            if self.args.plots or self.args.save_json:
+                LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
+            return stats_source
+
 
     def preprocess(self, batch: dict[str, Any]) -> dict[str, Any]:
         """Preprocess batch of images for YOLO validation.
@@ -85,41 +288,28 @@ class DomainAdaptationValidator(BaseValidator):
         batch["img"] = (batch["img"].half() if self.args.half else batch["img"].float()) / 255
         return batch
 
-    def init_metrics(self, model: torch.nn.Module, is_target: bool = False) -> None:
-        """Initialize evaluation metrics for YOLO domain adaptation validation.
+    def init_metrics(self, model: torch.nn.Module) -> None:
+        """Initialize evaluation metrics for YOLO detection validation.
 
         Args:
             model (torch.nn.Module): Model to validate.
-            is_target (bool): Whether initializing for target domain. Defaults to False.
         """
-        data = self.target_data if is_target else self.data
-        metrics = self.target_metrics if is_target else self.metrics
-        
-        val = data.get(self.args.split, "")  # validation path
-        is_coco = (
+        val = self.data.get(self.args.split, "")  # validation path
+        self.is_coco = (
             isinstance(val, str)
             and "coco" in val
             and (val.endswith(f"{os.sep}val2017.txt") or val.endswith(f"{os.sep}test-dev2017.txt"))
         )  # is COCO
-        is_lvis = isinstance(val, str) and "lvis" in val and not is_coco  # is LVIS
-        
-        if not is_target:
-            self.is_coco = is_coco
-            self.is_lvis = is_lvis
-            self.class_map = converter.coco80_to_coco91_class() if is_coco else list(range(1, len(model.names) + 1))
-            self.args.save_json |= self.args.val and (is_coco or is_lvis) and not self.training  # run final val
-        
+        self.is_lvis = isinstance(val, str) and "lvis" in val and not self.is_coco  # is LVIS
+        self.class_map = converter.coco80_to_coco91_class() if self.is_coco else list(range(1, len(model.names) + 1))
+        self.args.save_json |= self.args.val and (self.is_coco or self.is_lvis) and not self.training  # run final val
         self.names = model.names
         self.nc = len(model.names)
         self.end2end = getattr(model, "end2end", False)
         self.seen = 0
         self.jdict = []
-        metrics.names = model.names
-        
-        if is_target:
-            self.target_confusion_matrix = ConfusionMatrix(names=model.names, save_matches=self.args.plots and self.args.visualize)
-        else:
-            self.confusion_matrix = ConfusionMatrix(names=model.names, save_matches=self.args.plots and self.args.visualize)
+        self.metrics.names = model.names
+        self.confusion_matrix = ConfusionMatrix(names=model.names, save_matches=self.args.plots and self.args.visualize)
 
     def get_desc(self) -> str:
         """Return a formatted string summarizing class metrics of YOLO model."""
@@ -194,13 +384,14 @@ class DomainAdaptationValidator(BaseValidator):
         Args:
             preds (list[dict[str, torch.Tensor]]): List of predictions from the model.
             batch (dict[str, Any]): Batch data containing ground truth.
-            is_target (bool): Whether updating for target domain. Defaults to False.
+            is_target (bool): Whether this is target domain validation.
         """
         metrics = self.target_metrics if is_target else self.metrics
-        confusion_matrix = self.target_confusion_matrix if is_target else self.confusion_matrix
+        jdict = getattr(self, "target_jdict", []) if is_target else self.jdict
         
         for si, pred in enumerate(preds):
-            self.seen += 1
+            if not is_target:
+                self.seen += 1
             pbatch = self._prepare_batch(si, batch)
             predn = self._prepare_pred(pred)
 
@@ -216,51 +407,55 @@ class DomainAdaptationValidator(BaseValidator):
                 }
             )
             # Evaluate
-            if self.args.plots:
-                confusion_matrix.process_batch(predn, pbatch, conf=self.args.conf)
+            if self.args.plots and not is_target:
+                self.confusion_matrix.process_batch(predn, pbatch, conf=self.args.conf)
                 if self.args.visualize:
-                    confusion_matrix.plot_matches(batch["img"][si], pbatch["im_file"], self.save_dir)
+                    self.confusion_matrix.plot_matches(batch["img"][si], pbatch["im_file"], self.save_dir)
 
             if no_pred:
                 continue
 
-            # Save
-            if self.args.save_json or self.args.save_txt:
-                predn_scaled = self.scale_preds(predn, pbatch)
-            if self.args.save_json:
-                self.pred_to_json(predn_scaled, pbatch)
-            if self.args.save_txt:
-                self.save_one_txt(
-                    predn_scaled,
-                    self.args.save_conf,
-                    pbatch["ori_shape"],
-                    self.save_dir / "labels" / f"{Path(pbatch['im_file']).stem}.txt",
-                )
+            # Save (only for source domain)
+            if not is_target:
+                if self.args.save_json or self.args.save_txt:
+                    predn_scaled = self.scale_preds(predn, pbatch)
+                if self.args.save_json:
+                    self.pred_to_json(predn_scaled, pbatch)
+                if self.args.save_txt:
+                    self.save_one_txt(
+                        predn_scaled,
+                        self.args.save_conf,
+                        pbatch["ori_shape"],
+                        self.save_dir / "labels" / f"{Path(pbatch['im_file']).stem}.txt",
+                    )
 
     def finalize_metrics(self, is_target: bool = False) -> None:
         """Set final values for metrics speed and confusion matrix.
-
+        
         Args:
-            is_target (bool): Whether finalizing for target domain. Defaults to False.
+            is_target (bool): Whether this is target domain validation.
         """
         metrics = self.target_metrics if is_target else self.metrics
-        confusion_matrix = self.target_confusion_matrix if is_target else self.confusion_matrix
         
-        if self.args.plots:
-            suffix = "_target" if is_target else ""
+        if self.args.plots and not is_target:
             for normalize in True, False:
-                confusion_matrix.plot(save_dir=self.save_dir, normalize=normalize, on_plot=self.on_plot, suffix=suffix)
-        metrics.speed = self.speed
-        metrics.confusion_matrix = confusion_matrix
+                self.confusion_matrix.plot(save_dir=self.save_dir, normalize=normalize, on_plot=self.on_plot)
+        
+        if is_target:
+            metrics.speed = self.target_speed
+        else:
+            metrics.speed = self.speed
+        metrics.confusion_matrix = self.confusion_matrix
         metrics.save_dir = self.save_dir
 
     def gather_stats(self, is_target: bool = False) -> None:
         """Gather stats from all GPUs.
-
+        
         Args:
-            is_target (bool): Whether gathering for target domain. Defaults to False.
+            is_target (bool): Whether this is target domain validation.
         """
         metrics = self.target_metrics if is_target else self.metrics
+        jdict = getattr(self, "target_jdict", []) if is_target else self.jdict
         dataloader = self.target_dataloader if is_target else self.dataloader
         
         if RANK == 0:
@@ -271,51 +466,61 @@ class DomainAdaptationValidator(BaseValidator):
                 for key in merged_stats:
                     merged_stats[key].extend(stats_dict[key])
             gathered_jdict = [None] * dist.get_world_size()
-            dist.gather_object(self.jdict, gathered_jdict, dst=0)
-            self.jdict = []
-            for jdict in gathered_jdict:
-                self.jdict.extend(jdict)
+            dist.gather_object(jdict, gathered_jdict, dst=0)
+            if is_target:
+                self.target_jdict = []
+                for jd in gathered_jdict:
+                    self.target_jdict.extend(jd)
+            else:
+                self.jdict = []
+                for jd in gathered_jdict:
+                    self.jdict.extend(jd)
             metrics.stats = merged_stats
-            self.seen = len(dataloader.dataset)  # total image count from dataset
+            if not is_target:
+                self.seen = len(dataloader.dataset)  # total image count from dataset
         elif RANK > 0:
             dist.gather_object(metrics.stats, None, dst=0)
-            dist.gather_object(self.jdict, None, dst=0)
-            self.jdict = []
+            dist.gather_object(jdict, None, dst=0)
+            if is_target:
+                self.target_jdict = []
+            else:
+                self.jdict = []
             metrics.clear_stats()
 
     def get_stats(self, is_target: bool = False) -> dict[str, Any]:
         """Calculate and return metrics statistics.
 
         Args:
-            is_target (bool): Whether getting stats for target domain. Defaults to False.
+            is_target (bool): Whether this is target domain validation.
 
         Returns:
             (dict[str, Any]): Dictionary containing metrics results.
         """
         metrics = self.target_metrics if is_target else self.metrics
-        metrics.process(save_dir=self.save_dir, plot=self.args.plots, on_plot=self.on_plot)
+        metrics.process(save_dir=self.save_dir, plot=self.args.plots and not is_target, on_plot=self.on_plot)
         metrics.clear_stats()
         return metrics.results_dict
 
     def print_results(self, is_target: bool = False) -> None:
         """Print training/validation set metrics per class.
-
+        
         Args:
-            is_target (bool): Whether printing for target domain. Defaults to False.
+            is_target (bool): Whether this is target domain validation.
         """
         metrics = self.target_metrics if is_target else self.metrics
-        domain_prefix = "[Target Domain] " if is_target else "[Source Domain] "
+        seen = len(self.target_dataloader.dataset) if is_target else self.seen
+        domain_label = "Target" if is_target else "Source"
         
         pf = "%22s" + "%11i" * 2 + "%11.3g" * len(metrics.keys)  # print format
-        LOGGER.info(domain_prefix + pf % ("all", self.seen, metrics.nt_per_class.sum(), *metrics.mean_results()))
+        LOGGER.info(pf % ("all", seen, metrics.nt_per_class.sum(), *metrics.mean_results()))
         if metrics.nt_per_class.sum() == 0:
-            LOGGER.warning(f"{domain_prefix}no labels found in {self.args.task} set, cannot compute metrics without labels")
+            LOGGER.warning(f"no labels found in {self.args.task} set {domain_label}, cannot compute metrics without labels")
 
         # Print results per class
         if self.args.verbose and not self.training and self.nc > 1 and len(metrics.stats):
             for i, c in enumerate(metrics.ap_class_index):
                 LOGGER.info(
-                    domain_prefix + pf
+                    pf
                     % (
                         self.names[c],
                         metrics.nt_per_image[c],
@@ -340,34 +545,30 @@ class DomainAdaptationValidator(BaseValidator):
         iou = box_iou(batch["bboxes"], preds["bboxes"])
         return {"tp": self.match_predictions(preds["cls"], batch["cls"], iou).cpu().numpy()}
 
-    def build_dataset(self, img_path: str, mode: str = "val", batch: int | None = None, data: dict | None = None) -> torch.utils.data.Dataset:
+    def build_dataset(self, img_path: str, mode: str = "val", batch: int | None = None) -> torch.utils.data.Dataset:
         """Build YOLO Dataset.
 
         Args:
             img_path (str): Path to the folder containing images.
             mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
             batch (int, optional): Size of batches, this is for `rect`.
-            data (dict, optional): Dataset configuration dictionary. Defaults to self.data.
 
         Returns:
             (Dataset): YOLO dataset.
         """
-        data = data or self.data
-        return build_yolo_dataset(self.args, img_path, batch, data, mode=mode, stride=self.stride)
+        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, stride=self.stride)
 
-    def get_dataloader(self, dataset_path: str, batch_size: int, data: dict | None = None) -> torch.utils.data.DataLoader:
+    def get_dataloader(self, dataset_path: str, batch_size: int) -> torch.utils.data.DataLoader:
         """Construct and return dataloader.
 
         Args:
             dataset_path (str): Path to the dataset.
             batch_size (int): Size of each batch.
-            data (dict, optional): Dataset configuration dictionary. Defaults to self.data.
 
         Returns:
             (torch.utils.data.DataLoader): DataLoader for validation.
         """
-        data = data or self.data
-        dataset = self.build_dataset(dataset_path, batch=batch_size, mode="val", data=data)
+        dataset = self.build_dataset(dataset_path, batch=batch_size, mode="val")
         return build_dataloader(
             dataset,
             batch_size,
@@ -378,25 +579,23 @@ class DomainAdaptationValidator(BaseValidator):
             pin_memory=self.training,
         )
 
-    def plot_val_samples(self, batch: dict[str, Any], ni: int, is_target: bool = False) -> None:
+    def plot_val_samples(self, batch: dict[str, Any], ni: int) -> None:
         """Plot validation image samples.
 
         Args:
             batch (dict[str, Any]): Batch containing images and annotations.
             ni (int): Batch index.
-            is_target (bool): Whether plotting for target domain. Defaults to False.
         """
-        suffix = "_target" if is_target else ""
         plot_images(
             labels=batch,
             paths=batch["im_file"],
-            fname=self.save_dir / f"val_batch{ni}_labels{suffix}.jpg",
+            fname=self.save_dir / f"val_batch{ni}_labels.jpg",
             names=self.names,
             on_plot=self.on_plot,
         )
 
     def plot_predictions(
-        self, batch: dict[str, Any], preds: list[dict[str, torch.Tensor]], ni: int, max_det: int | None = None, is_target: bool = False
+        self, batch: dict[str, Any], preds: list[dict[str, torch.Tensor]], ni: int, max_det: int | None = None
     ) -> None:
         """Plot predicted bounding boxes on input images and save the result.
 
@@ -405,7 +604,6 @@ class DomainAdaptationValidator(BaseValidator):
             preds (list[dict[str, torch.Tensor]]): List of predictions from the model.
             ni (int): Batch index.
             max_det (int | None): Maximum number of detections to plot.
-            is_target (bool): Whether plotting for target domain. Defaults to False.
         """
         if not preds:
             return
@@ -415,12 +613,11 @@ class DomainAdaptationValidator(BaseValidator):
         max_det = max_det or self.args.max_det
         batched_preds = {k: torch.cat([x[k][:max_det] for x in preds], dim=0) for k in keys}
         batched_preds["bboxes"] = ops.xyxy2xywh(batched_preds["bboxes"])  # convert to xywh format
-        suffix = "_target" if is_target else ""
         plot_images(
             images=batch["img"],
             labels=batched_preds,
             paths=batch["im_file"],
-            fname=self.save_dir / f"val_batch{ni}_pred{suffix}.jpg",
+            fname=self.save_dir / f"val_batch{ni}_pred.jpg",
             names=self.names,
             on_plot=self.on_plot,
         )  # pred
@@ -533,154 +730,4 @@ class DomainAdaptationValidator(BaseValidator):
         """
         if self.args.save_json and (self.is_coco or self.is_lvis) and len(self.jdict):
             LOGGER.info(f"\nEvaluating faster-coco-eval mAP using {pred_json} and {anno_json}...")
-            try:
-                for x in pred_json, anno_json:
-                    assert x.is_file(), f"{x} file not found"
-                iou_types = [iou_types] if isinstance(iou_types, str) else iou_types
-                suffix = [suffix] if isinstance(suffix, str) else suffix
-                check_requirements("faster-coco-eval>=1.6.7")
-                from faster_coco_eval import COCO, COCOeval_faster
-
-                anno = COCO(anno_json)
-                pred = anno.loadRes(pred_json)
-                for i, iou_type in enumerate(iou_types):
-                    val = COCOeval_faster(
-                        anno, pred, iouType=iou_type, lvis_style=self.is_lvis, print_function=LOGGER.info
-                    )
-                    val.params.imgIds = [int(Path(x).stem) for x in self.dataloader.dataset.im_files]  # images to eval
-                    val.evaluate()
-                    val.accumulate()
-                    val.summarize()
-
-                    # update mAP50-95 and mAP50
-                    stats[f"metrics/mAP50({suffix[i][0]})"] = val.stats_as_dict["AP_50"]
-                    stats[f"metrics/mAP50-95({suffix[i][0]})"] = val.stats_as_dict["AP_all"]
-                    # record mAP for small, medium, large objects as well
-                    stats["metrics/mAP_small(B)"] = val.stats_as_dict["AP_small"]
-                    stats["metrics/mAP_medium(B)"] = val.stats_as_dict["AP_medium"]
-                    stats["metrics/mAP_large(B)"] = val.stats_as_dict["AP_large"]
-                    # update fitness
-                    stats["fitness"] = 0.9 * val.stats_as_dict["AP_all"] + 0.1 * val.stats_as_dict["AP_50"]
-
-                    if self.is_lvis:
-                        stats[f"metrics/APr({suffix[i][0]})"] = val.stats_as_dict["APr"]
-                        stats[f"metrics/APc({suffix[i][0]})"] = val.stats_as_dict["APc"]
-                        stats[f"metrics/APf({suffix[i][0]})"] = val.stats_as_dict["APf"]
-
-                if self.is_lvis:
-                    stats["fitness"] = stats["metrics/mAP50-95(B)"]  # always use box mAP50-95 for fitness
-            except Exception as e:
-                LOGGER.warning(f"faster-coco-eval unable to run: {e}")
-        return stats
-
-    def __call__(self, trainer=None, model=None):
-        """Execute validation process on both source and target domains.
-
-        Args:
-            trainer (object, optional): Trainer object that contains the model to validate.
-            model (nn.Module, optional): Model to validate if not using a trainer.
-
-        Returns:
-            (dict): Dictionary containing validation statistics for both domains.
-        """
-        # Run source domain validation using parent class
-        source_stats = super().__call__(trainer, model)
-        
-        # If target data is specified, run target domain validation
-        if self.target_data_path:
-            target_stats = self._validate_target(trainer, model)
-            # Combine stats with prefix for target domain
-            if target_stats:
-                for key, value in target_stats.items():
-                    source_stats[f"target_{key}"] = value
-        
-        return source_stats
-    
-    def _validate_target(self, trainer, model) -> dict[str, Any]:
-        """Validate model on target domain dataset.
-
-        Args:
-            trainer (object, optional): Trainer object that contains the model to validate.
-            model (nn.Module): Model to validate.
-
-        Returns:
-            (dict[str, Any]): Dictionary containing target domain validation statistics.
-        """
-        from ultralytics.data.utils import check_det_dataset
-        from ultralytics.utils import TQDM
-        from ultralytics.utils.ops import Profile
-        from ultralytics.utils.torch_utils import unwrap_model
-        
-        if self.target_data is None:
-            # Load target domain dataset
-            self.target_data = check_det_dataset(self.target_data_path)
-            # Create target dataloader   
-            target_path = self.target_data.get(self.args.split)
-            if target_path is None:
-                raise Exception(f"No validation split found in target dataset: {self.args.split}")
-            self.target_dataloader = self.get_dataloader(target_path, self.args.batch, data=self.target_data)
-        
-        if trainer is not None:
-            self.device = trainer.device
-            self.data = trainer.data
-            # Force FP16 val during training
-            self.args.half = self.device.type != "cpu" and trainer.amp
-            model = trainer.ema.ema or trainer.model
-            if trainer.args.compile and hasattr(model, "_orig_mod"):
-                model = model._orig_mod  # validate non-compiled original model to avoid issues
-            model = model.half() if self.args.half else model.float()
-            self.loss = torch.zeros_like(trainer.loss_items, device=trainer.device)
-            self.args.plots &= trainer.stopper.possible_stop or (trainer.epoch == trainer.epochs - 1)
-            model.eval()
-        else:
-            assert False, "todo"
-            
-        # Initialize target metrics
-        self.target_metrics = DetMetrics()
-        
-        # Run validation on target domain
-        augment = self.args.augment
-        
-        self.run_callbacks("on_val_start")
-        dt = (
-            Profile(device=self.device),
-            Profile(device=self.device),
-            Profile(device=self.device),
-            Profile(device=self.device),
-        )
-        bar = TQDM(self.target_dataloader, desc=self.get_desc(), total=len(self.target_dataloader))
-        self.init_metrics(unwrap_model(model), is_target=True)
-        self.jdict = []  # empty before each val
-        
-        for batch_i, batch in enumerate(bar):
-            self.run_callbacks("on_val_batch_start")
-            self.batch_i = batch_i
-            # Preprocess
-            with dt[0]:
-                batch = self.preprocess(batch)
-
-            # Inference
-            with dt[1]:
-                preds = model(batch["img"], augment=augment)
-
-            # Postprocess
-            with dt[3]:
-                preds = self.postprocess(preds)
-
-            self.update_metrics(preds, batch, is_target=True)
-            if self.args.plots and batch_i < 3 and RANK in {-1, 0}:
-                self.plot_val_samples(batch, batch_i, is_target=True)
-                self.plot_predictions(batch, preds, batch_i, is_target=True)
-
-            self.run_callbacks("on_val_batch_end")
-
-        stats = {}
-        self.gather_stats(is_target=True)
-        if RANK in {-1, 0}:
-            stats = self.get_stats(is_target=True)
-            self.speed = dict(zip(self.speed.keys(), (x.t / len(self.target_dataloader.dataset) * 1e3 for x in dt)))
-            self.finalize_metrics(is_target=True)
-            self.print_results(is_target=True)
-            self.run_callbacks("on_val_end")
-        
         return stats

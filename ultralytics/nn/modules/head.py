@@ -302,7 +302,7 @@ class DetectGRL(Detect):
     
     # 梯度反转层
     class GradientScalarLayer(torch.nn.Module):
-        def __init__(self, weight: float = -1):
+        def __init__(self, weight: float = -0.1):
             super().__init__()
             self.weight = weight
 
@@ -315,13 +315,13 @@ class DetectGRL(Detect):
     def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
         assert end2end, "只考虑端到端模式"
         assert reg_max == 1, "不使用DFL"
-        super().__init__(nc, reg_max, end2end, ch)
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
         
         # 域分类器：对每层应用3次卷积（3x3, 3x3, 1x1，输出16通道）
         c_dom = max(ch[0] // 4, 16)  # 中间层通道数
         self.domain_cls = nn.ModuleList(
             nn.Sequential(
-                DetectGRL.GradientScalarLayer(),  # 梯度反转层
+                DetectGRL.GradientScalarLayer(-0.1),  # 梯度反转层
                 Conv(x, c_dom, 3),           # 3x3卷积
                 Conv(c_dom, c_dom, 3),       # 3x3卷积
                 Conv(c_dom, 16, 1),          # 1x1卷积，输出16通道
@@ -333,6 +333,16 @@ class DetectGRL(Detect):
         # 输入通道总数 = 16 * 层数，输出 = 1（二分类）
         self.domain_fusion = nn.Conv2d(16 * self.nl, 1, 1)
         self.domain_classify_only = False
+    
+    @property
+    def grl_weight(self) -> float:
+        # 三个GradientScalarLayer的weight是相同的
+        return self.domain_cls[0][0].weight
+    
+    @grl_weight.setter
+    def grl_weight(self, value: float):
+        for seq in self.domain_cls:
+            seq[0].weight = value
         
     def predict_domain(self, x: list[torch.Tensor]) -> torch.Tensor | None:
         """预测图像属于源域还是目标域，输出形状为[batch_size]的向量，规定源域为0，目标域为1"""

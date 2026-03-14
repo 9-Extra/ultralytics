@@ -11,6 +11,7 @@ from pathlib import Path
 
 import torch
 from ultralytics import YOLO
+from ultralytics.nn.tasks import yaml_model_load, DetectionModel
 
 
 def parse_args():
@@ -48,7 +49,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=100, help="训练轮数 (默认: 100)")
     parser.add_argument("--batch", type=int, default=16, help="批次大小 (默认: 16)")
     parser.add_argument(
-        "--imgsz", type=int, default=640, help="输入图像尺寸 (默认: 640)"
+        "--imgsz", type=int, default=960, help="输入图像尺寸 (默认: 960)"
     )
     parser.add_argument(
         "--lr0", type=float, default=0.01, help="初始学习率 (默认: 0.01)"
@@ -56,8 +57,14 @@ def parse_args():
     parser.add_argument(
         "--domain-loss-weight",
         type=float,
-        default=0.1,
-        help="域适应损失权重 (默认: 0.1)",
+        default=1,
+        help="域适应损失权重 (默认: 1)",
+    )
+    parser.add_argument(
+        "--grl-weight",
+        type=float,
+        default=-0.1,
+        help="梯度反转层系数 (默认: -0.1)",
     )
 
     # 其他配置
@@ -68,7 +75,7 @@ def parse_args():
         help="训练设备 (默认: 0, 使用 GPU 0; 可设置为 'cpu' 或 '0,1,2,3' 使用多卡)",
     )
     parser.add_argument(
-        "--workers", type=int, default=0, help="数据加载器工作进程数 (默认: 8)"
+        "--workers", type=int, default=4, help="数据加载器工作进程数 (默认: 4)"
     )
     parser.add_argument(
         "--project", type=str, default="", help="项目保存路径 (默认: " ")"
@@ -124,6 +131,7 @@ def main():
     print(f"批次大小: {args.batch}")
     print(f"图像尺寸: {args.imgsz}")
     print(f"域适应损失权重: {args.domain_loss_weight}")
+    print(f"梯度反转层系数: {args.grl_weight}")
     print(f"设备: {args.device}")
     print("=" * 60)
 
@@ -135,6 +143,22 @@ def main():
         print(f"加载模型配置: {model_path}")
         model = YOLO(str(model_path))
 
+    # 设置 DetectGRL 的 grl_weight
+    def set_grl_weight(model, weight):
+        """递归设置 DetectGRL 模块的 grl_weight"""
+        count = 0
+        for module in model.modules():
+            if module.__class__.__name__ == "DetectGRL":
+                module.grl_weight = weight
+                count += 1
+        return count
+    
+    grl_count = set_grl_weight(model.model, args.grl_weight)
+    if grl_count > 0:
+        print(f"已设置 {grl_count} 个 DetectGRL 模块的 grl_weight = {args.grl_weight}")
+    else:
+        print("警告: 未找到 DetectGRL 模块，grl_weight 设置未生效")
+
     # 开始训练
     print("\n开始训练...\n")
     results = model.train(
@@ -144,6 +168,8 @@ def main():
         batch=args.batch,
         imgsz=args.imgsz,
         lr0=args.lr0,
+        optimizer="MuSGD",
+        deterministic=False,
         domain_loss_weight=args.domain_loss_weight,
         device=args.device,
         workers=args.workers,
@@ -158,7 +184,6 @@ def main():
 
     print("\n" + "=" * 60)
     print("训练完成!")
-    print(f"最佳模型: {results.best}")
     print("=" * 60)
 
     return results

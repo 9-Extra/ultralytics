@@ -267,8 +267,24 @@ class DomainAdaptationTrainer(BaseTrainer):
     def get_validator(self):
         """Return a DomainAdaptationValidator for YOLO model validation."""
         self.loss_names = "box_loss", "cls_loss", "dfl_loss"
+        
+        # Create target domain validation dataloader if target_data is available
+        target_val_loader = None
+        if hasattr(self, "target_data") and self.target_data is not None:
+            try:
+                target_val_path = self.target_data.get(self.args.split) or self.target_data.get("val")
+                if target_val_path:
+                    target_val_loader = self.get_dataloader(target_val_path, self.args.batch, mode="val")
+                    LOGGER.info(f"目标域验证数据加载器创建完成，用于验证阶段")
+            except Exception as e:
+                LOGGER.warning(f"无法创建目标域验证数据加载器: {e}")
+        
         return yolo.domain_adapt.DomainAdaptationValidator(
-            self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
+            self.test_loader, 
+            save_dir=self.save_dir, 
+            args=copy(self.args), 
+            _callbacks=self.callbacks,
+            target_dataloader=target_val_loader
         )
 
     def label_loss_items(self, loss_items: list[float] | None = None, prefix: str = "train"):
@@ -410,11 +426,25 @@ class DomainAdaptationTrainer(BaseTrainer):
                     loss = loss.sum() # original_yolo_loss
                     
                     origin_domain_preds = preds["domain_pred"]
-                    unwrap_model(self.model).model[-1].domain_classify_only = True
+                    head = unwrap_model(self.model).model[-1]
+                    backbone_neck = unwrap_model(self.model).model[:-1]  # 除 head 外的所有层
+                    # 冻结所有 BatchNorm 的统计量更新
+                    for m in backbone_neck:
+                        if isinstance(m, nn.BatchNorm2d):
+                            m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
+
+                    # 跳过目标域分类器
+                    head.domain_classify_only = True                    
                     target_domain_preds = self.model(batch["domain_img"])["domain_pred"]
-                    unwrap_model(self.model).model[-1].domain_classify_only = False
+                    
+                    # 恢复训练模式
+                    head.domain_classify_only = False
+                    for m in backbone_neck:
+                        if isinstance(m, nn.BatchNorm2d):
+                            m.train()
+
                     od_loss = torch.nn.functional.binary_cross_entropy_with_logits(origin_domain_preds, torch.zeros_like(origin_domain_preds), reduction="sum")
-                    td_loss: torch.Tensor = torch.nn.functional.binary_cross_entropy_with_logits(target_domain_preds, torch.ones_like(target_domain_preds), reduction="sum")
+                    td_loss = torch.nn.functional.binary_cross_entropy_with_logits(target_domain_preds, torch.ones_like(target_domain_preds), reduction="sum")
                     domain_loss_weight = getattr(self.args, "domain_loss_weight", 0.1)
                     domain_loss = (od_loss + td_loss) * domain_loss_weight
                     loss += domain_loss
