@@ -445,7 +445,7 @@ class DomainAdaptationTrainer(BaseTrainer):
 
                     od_loss = torch.nn.functional.binary_cross_entropy_with_logits(origin_domain_preds, torch.zeros_like(origin_domain_preds), reduction="sum")
                     td_loss = torch.nn.functional.binary_cross_entropy_with_logits(target_domain_preds, torch.ones_like(target_domain_preds), reduction="sum")
-                    domain_loss_weight = getattr(self.args, "domain_loss_weight", 0.1)
+                    domain_loss_weight = getattr(self.args, "domain_loss_weight", 1)
                     domain_loss = (od_loss + td_loss) * domain_loss_weight
                     loss += domain_loss
                     self.loss_items += domain_loss.detach()
