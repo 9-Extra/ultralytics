@@ -204,7 +204,6 @@ class DomainAdaptationValidator(BaseValidator):
             dt_target = None
 
         # Gather and process source domain stats
-        stats_source = {}
         self.gather_stats(is_target=False)
         
         # Gather and process target domain stats
@@ -213,7 +212,7 @@ class DomainAdaptationValidator(BaseValidator):
         
         if RANK in {-1, 0}:
             # Source domain results
-            stats_source = self.get_stats(is_target=False)
+            stats = self.get_stats(is_target=False)
             self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt_source)))
             self.finalize_metrics(is_target=False)
             LOGGER.info("\n" + "=" * 60)
@@ -221,11 +220,14 @@ class DomainAdaptationValidator(BaseValidator):
             self.print_results(is_target=False)
             
             # Target domain results
+            target_stats = {}
             if dt_target is not None:
                 LOGGER.info("\n" + "-" * 60)
                 LOGGER.info("Target Domain Validation Results:")
                 self.target_speed = dict(zip(self.speed.keys(), (x.t / len(self.target_dataloader.dataset) * 1e3 for x in dt_target)))
-                _ = self.get_stats(is_target=True)  # Compute stats for target domain
+                target_stats_raw = self.get_stats(is_target=True)  # Compute stats for target domain
+                # Add target_ prefix to target domain metrics
+                target_stats = {f"target_{k}": v for k, v in target_stats_raw.items()}
                 self.finalize_metrics(is_target=True)
                 self.print_results(is_target=True)
             
@@ -240,18 +242,15 @@ class DomainAdaptationValidator(BaseValidator):
                 dist.reduce(loss, dst=0, op=dist.ReduceOp.AVG)
             if RANK > 0:
                 return
-            results = {**stats_source, **trainer.label_loss_items(loss.cpu() / len(self.dataloader), prefix="val")}
-            
-            # Add target domain metrics if available
-            if dt_target is not None and self.target_metrics is not None:
-                target_results = self.target_metrics.results_dict
-                for k, v in target_results.items():
-                    results[f"target_{k}"] = round(float(v), 5)
+            # Merge source and target stats, add target_ prefix to target metrics
+            results = {**stats, **target_stats, **trainer.label_loss_items(loss.cpu() / len(self.dataloader), prefix="val")}
             
             return {k: round(float(v), 5) for k, v in results.items()}  # return results as 5 decimal place floats
         else:
+            # Merge source and target stats for non-training mode
+            stats = {**stats, **target_stats}
             if RANK > 0:
-                return stats_source
+                return stats
             LOGGER.info(
                 "Speed: {:.1f}ms preprocess, {:.1f}ms inference, {:.1f}ms loss, {:.1f}ms postprocess per image".format(
                     *tuple(self.speed.values())
@@ -267,10 +266,10 @@ class DomainAdaptationValidator(BaseValidator):
                 with open(str(self.save_dir / "predictions.json"), "w", encoding="utf-8") as f:
                     LOGGER.info(f"Saving {f.name}...")
                     json.dump(self.jdict, f)  # flatten and save
-                stats_source = self.eval_json(stats_source)  # update stats
+                stats = self.eval_json(stats)  # update stats
             if self.args.plots or self.args.save_json:
                 LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
-            return stats_source
+            return stats
 
 
     def preprocess(self, batch: dict[str, Any]) -> dict[str, Any]:
