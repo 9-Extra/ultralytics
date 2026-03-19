@@ -196,42 +196,28 @@ class DomainAdaptationValidator(BaseValidator):
         
         # Validate on source domain
         dt_source = self._validate_dataloader(self.dataloader, model, augment, desc_suffix="")
-        
-        # Validate on target domain if available
-        if self.target_dataloader is not None and len(self.target_dataloader) > 0:
-            dt_target = self._validate_dataloader(self.target_dataloader, model, augment, desc_suffix=" (target)")
-        else:
-            dt_target = None
-
-        # Gather and process source domain stats
         self.gather_stats(is_target=False)
-        
-        # Gather and process target domain stats
-        if dt_target is not None:
-            self.gather_stats(is_target=True)
-        
         if RANK in {-1, 0}:
-            # Source domain results
             stats = self.get_stats(is_target=False)
             self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt_source)))
             self.finalize_metrics(is_target=False)
-            LOGGER.info("\n" + "=" * 60)
-            LOGGER.info("Source Domain Validation Results:")
             self.print_results(is_target=False)
             
-            # Target domain results
-            target_stats = {}
-            if dt_target is not None:
-                LOGGER.info("\n" + "-" * 60)
-                LOGGER.info("Target Domain Validation Results:")
+        # Validate on target domain if available
+        if self.target_dataloader is not None and len(self.target_dataloader) > 0:
+            dt_target = self._validate_dataloader(self.target_dataloader, model, augment, desc_suffix=" (target)")
+            self.gather_stats(is_target=True)
+            if RANK in {-1, 0}:
                 self.target_speed = dict(zip(self.speed.keys(), (x.t / len(self.target_dataloader.dataset) * 1e3 for x in dt_target)))
-                target_stats_raw = self.get_stats(is_target=True)  # Compute stats for target domain
+                target_stats = self.get_stats(is_target=True)  # Compute stats for target domain
                 # Add target_ prefix to target domain metrics
-                target_stats = {f"target_{k}": v for k, v in target_stats_raw.items()}
+                target_stats = {f"target_{k}": v for k, v in target_stats.items()}
                 self.finalize_metrics(is_target=True)
                 self.print_results(is_target=True)
-            
-            LOGGER.info("=" * 60 + "\n")
+        else:
+            dt_target = None
+        
+        if RANK in {-1, 0}:
             self.run_callbacks("on_val_end")
 
         if self.training:
