@@ -184,6 +184,7 @@ class DomainAdaptationValidator(BaseValidator):
             (dict): Dictionary containing validation statistics.
         """
         self.training = trainer is not None
+        target_stats = {}  # Initialize target_stats
         
         # Setup model
         model, augment = self._setup_model(trainer, model)
@@ -293,7 +294,8 @@ class DomainAdaptationValidator(BaseValidator):
         self.seen = 0
         self.jdict = []
         self.metrics.names = model.names
-        self.target_metrics.names = model.names
+        if self.target_metrics is not None:
+            self.target_metrics.names = model.names
         self.confusion_matrix = ConfusionMatrix(names=model.names, save_matches=self.args.plots and self.args.visualize)
 
     def get_desc(self) -> str:

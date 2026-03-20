@@ -59,7 +59,7 @@ def fix_checkpoint(model_path):
         # 检查是否是损坏的 checkpoint（model 为 None 但有 ema）
         if ckpt.get('model') is None and ckpt.get('ema') is not None:
             LOGGER.warning(f"检测到损坏的 checkpoint: {model_path}")
-            LOGGER.info(f"Epoch: {ckpt.get('epoch')}, Best fitness: {ckpt.get('best_fitness')}")
+            print(f"Epoch: {ckpt.get('epoch')}, Best fitness: {ckpt.get('best_fitness')}")
             
             # 创建修复后的模型文件
             fixed_path = str(model_path).replace('.pt', '_fixed.pt')
@@ -76,13 +76,13 @@ def fix_checkpoint(model_path):
                 'date': ckpt.get('date'),
             }, fixed_path)
             
-            LOGGER.info(f"已修复并保存到: {fixed_path}")
-            return fixed_path
+            print(f"已修复并保存到: {fixed_path}")
+            return fixed_path, True
         
-        return str(model_path)
+        return str(model_path), False
     except Exception as e:
         LOGGER.warning(f"检查 checkpoint 时出错: {e}")
-        return str(model_path)
+        return str(model_path), False
 
 
 def validate_model(model_path, source_dataloader, target_dataloader, batch_size=16, imgsz=640, device=""):
@@ -103,16 +103,16 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     model_path = Path(model_path).resolve()
     model_name = model_path.parent.parent.name
     
-    LOGGER.info(f"\n{'='*60}")
-    LOGGER.info(f"正在验证模型: {model_name}")
-    LOGGER.info(f"模型路径: {model_path}")
-    LOGGER.info(f"设备: {device if device else 'auto'}")
-    LOGGER.info(f"{'='*60}\n")
+    print(f"\n{'='*60}")
+    print(f"正在验证模型: {model_name}")
+    print(f"模型路径: {model_path}")
+    print(f"设备: {device if device else 'auto'}")
+    print(f"{'='*60}\n")
     
     # 修复可能的损坏 checkpoint
-    fixed_model_path = fix_checkpoint(model_path)
+    fixed_model_path, do_fixed = fix_checkpoint(model_path)
     fixed_model_path = Path(fixed_model_path).resolve()
-    LOGGER.info(f"使用模型路径: {fixed_model_path}")
+    print(f"使用模型路径: {fixed_model_path}")
     
     # 检查文件是否存在
     if not fixed_model_path.exists():
@@ -137,7 +137,7 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     args.augment = False
     args.task = "detect"
     args.split = "val"
-    args.plots = False
+    args.plots = True
     args.verbose = True
     args.save_json = False
     args.save_txt = False
@@ -199,7 +199,7 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     return {
         "model": model_name,
         "model_path": str(model_path),
-        "fixed_model_path": str(fixed_model_path) if fixed_model_path != str(model_path) else None,
+        "fixed_model_path": str(fixed_model_path) if do_fixed else None,
         "source": source_results,
         "target": target_results,
     }
@@ -209,19 +209,19 @@ def main():
     """主函数：验证所有模型"""
     
     # 打印环境信息
-    LOGGER.info(f"\n{'='*80}")
-    LOGGER.info("验证脚本 v2 - 环境信息")
-    LOGGER.info(f"{'='*80}")
-    LOGGER.info(f"Python: {sys.version}")
-    LOGGER.info(f"PyTorch: {torch.__version__}")
-    LOGGER.info(f"CUDA 可用: {torch.cuda.is_available()}")
+    print(f"\n{'='*80}")
+    print("验证脚本 v2 - 环境信息")
+    print(f"{'='*80}")
+    print(f"Python: {sys.version}")
+    print(f"PyTorch: {torch.__version__}")
+    print(f"CUDA 可用: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
-        LOGGER.info(f"CUDA 版本: {torch.version.cuda}")
-        LOGGER.info(f"cuDNN 版本: {torch.backends.cudnn.version()}")
-        LOGGER.info(f"GPU: {torch.cuda.get_device_name(0)}")
-    LOGGER.info(f"工作目录: {Path.cwd()}")
-    LOGGER.info(f"项目根目录: {project_root}")
-    LOGGER.info(f"{'='*80}\n")
+        print(f"CUDA 版本: {torch.version.cuda}")
+        print(f"cuDNN 版本: {torch.backends.cudnn.version()}")
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"工作目录: {Path.cwd()}")
+    print(f"项目根目录: {project_root}")
+    print(f"{'='*80}\n")
     
     # 配置
     runs_dir = Path("runs/detect")
@@ -243,7 +243,7 @@ def main():
         LOGGER.warning(f"在 {runs_dir} 中没有找到模型")
         return
     
-    LOGGER.info(f"发现 {len(model_dirs)} 个模型需要验证")
+    print(f"发现 {len(model_dirs)} 个模型需要验证")
     
     # 准备参数用于数据加载器
     args = get_cfg()
@@ -273,7 +273,7 @@ def main():
     # 构建数据加载器
     source_dataloader = get_dataloader(data.get("val"), args, data, batch_size)
     target_dataloader = get_dataloader(target_data_dict.get("val"), args, target_data_dict, batch_size)
-    LOGGER.info("数据集加载完成！\n")
+    print("数据集加载完成！\n")
     
     # 存储所有结果
     all_results = []
@@ -303,9 +303,9 @@ def main():
             traceback.print_exc()
     
     # 打印汇总结果
-    LOGGER.info(f"\n{'='*90}")
-    LOGGER.info("验证结果汇总")
-    LOGGER.info(f"{'='*90}\n")
+    print(f"\n{'='*90}")
+    print("验证结果汇总")
+    print(f"{'='*90}\n")
     
     print(f"{'模型':<30} {'源域 mAP50':>12} {'源域 mAP50-95':>14} {'目标域 mAP50':>14} {'目标域 mAP50-95':>16}")
     print("-" * 90)
@@ -334,7 +334,7 @@ def main():
     with open(output_file, "w") as f:
         json.dump(all_results, f, indent=2)
     
-    LOGGER.info(f"\n详细结果已保存到: {output_file}")
+    print(f"\n详细结果已保存到: {output_file}")
     
 
 if __name__ == "__main__":
