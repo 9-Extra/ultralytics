@@ -137,7 +137,7 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     args.augment = False
     args.task = "detect"
     args.split = "val"
-    args.plots = True
+    args.plots = False
     args.verbose = True
     args.save_json = False
     args.save_txt = False
@@ -146,10 +146,12 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     args.dnn = False
     args.end2end = None
     
+    save_dir = Path("runs/validate") / model_name
+    
     # 创建验证器
     validator = DomainAdaptationValidator(
         dataloader=source_dataloader,
-        save_dir=Path("runs/validate") / model_name,
+        save_dir=save_dir,
         args=args,
         target_dataloader=target_dataloader
     )
@@ -161,6 +163,18 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     if results is None:
         LOGGER.error("验证返回 None！")
         return None
+    
+    with open(save_dir / "metrics.txt", "w") as m:
+        m.write("==================================\nSource domain:\n")
+        m.write(validator.metrics.to_csv())
+        # for c in validator.metrics.summary():
+        #     for k, v in c.items():
+        #         m.write(f"{k}: {v}\n")
+        m.write("\n\n==================================\nTarget domain:\n")
+        # for c in validator.target_metrics.summary():
+        #     for k, v in c.items():
+        #         m.write(f"{k}: {v}\n")
+        m.write(validator.target_metrics.to_csv())
     
     LOGGER.debug(f"Results keys: {list(results.keys())}")
     

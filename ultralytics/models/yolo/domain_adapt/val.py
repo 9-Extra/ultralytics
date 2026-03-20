@@ -137,7 +137,6 @@ class DomainAdaptationValidator(BaseValidator):
         
         # Reset metrics and jdict for this validation run
         if desc_suffix == " (target)":
-            self.target_metrics = DetMetrics()
             self.target_jdict = []
         else:
             self.jdict = []
@@ -294,6 +293,7 @@ class DomainAdaptationValidator(BaseValidator):
         self.seen = 0
         self.jdict = []
         self.metrics.names = model.names
+        self.target_metrics.names = model.names
         self.confusion_matrix = ConfusionMatrix(names=model.names, save_matches=self.args.plots and self.args.visualize)
 
     def get_desc(self) -> str:
