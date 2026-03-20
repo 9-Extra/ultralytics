@@ -788,7 +788,9 @@ def ap_per_class(
         prec_values (np.ndarray): Precision values at mAP@0.5 for each class.
     """
     # Sort by objectness
-    i = np.argsort(-conf)
+    # Note: Use np.negative to avoid in-place modification of conf
+    neg_conf = np.negative(conf)
+    i = np.argsort(neg_conf)
     tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
 
     # Find unique classes
@@ -813,11 +815,11 @@ def ap_per_class(
 
         # Recall
         recall = tpc / (n_l + eps)  # recall curve
-        r_curve[ci] = np.interp(-x, -conf[i], recall[:, 0], left=0)  # negative x, xp because xp decreases
+        r_curve[ci] = np.interp(-x, np.negative(conf[i]), recall[:, 0], left=0)  # negative x, xp because xp decreases
 
         # Precision
         precision = tpc / (tpc + fpc)  # precision curve
-        p_curve[ci] = np.interp(-x, -conf[i], precision[:, 0], left=1)  # p at pr_score
+        p_curve[ci] = np.interp(-x, np.negative(conf[i]), precision[:, 0], left=1)  # p at pr_score
 
         # AP from recall-precision curve
         for j in range(tp.shape[1]):
