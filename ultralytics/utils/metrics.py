@@ -810,16 +810,17 @@ def ap_per_class(
             continue
 
         # Accumulate FPs and TPs
-        fpc = (1 - tp[i]).cumsum(0)
-        tpc = tp[i].cumsum(0)
+        tp_i = tp[i]
+        fpc = (1 - tp_i).cumsum(0)
+        tpc = tp_i.cumsum(0)
 
         # Recall
         recall = tpc / (n_l + eps)  # recall curve
-        r_curve[ci] = np.interp(-x, np.negative(conf[i]), recall[:, 0], left=0)  # negative x, xp because xp decreases
+        r_curve[ci] = np.interp(-x, np.negative(conf[i]), recall[:, 0], left=0, right=recall[-1, 0] if len(recall) > 0 else 0)
 
-        # Precision
-        precision = tpc / (tpc + fpc)  # precision curve
-        p_curve[ci] = np.interp(-x, np.negative(conf[i]), precision[:, 0], left=1)  # p at pr_score
+        # Precision - 注意：tpc + fpc 在某些情况下会就地修改 tpc，需要先复制
+        precision = tpc / (tpc.copy() + fpc)  # precision curve
+        p_curve[ci] = np.interp(-x, np.negative(conf[i]), precision[:, 0], left=precision[0, 0] if len(precision) > 0 else 1, right=precision[-1, 0] if len(precision) > 0 else 0)
 
         # AP from recall-precision curve
         for j in range(tp.shape[1]):
