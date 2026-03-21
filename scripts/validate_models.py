@@ -139,7 +139,7 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     args.split = "val"
     args.plots = True
     args.verbose = True
-    args.save_json = True
+    args.save_json = False
     args.save_txt = False
     args.half = True
     args.rect = False
@@ -319,15 +319,10 @@ def main():
         
         # 标记是否修复过
         fixed_marker = "*" if r.get("fixed_model_path") else " "
-        
-        # 标记是否异常（mAP50 < 0.6 可能是随机权重）
-        warning_marker = " (!)" if src_map50 < 0.6 else ""
-        
-        print(f"{model_name:<29}{fixed_marker} {src_map50:>12.4f} {src_map5095:>14.4f} {tgt_map50:>14.4f} {tgt_map5095:>16.4f}{warning_marker}")
+        print(f"{model_name:<29}{fixed_marker} {src_map50:>12.4f} {src_map5095:>14.4f} {tgt_map50:>14.4f} {tgt_map5095:>16.4f}")
     
     print("-" * 90)
     print("* 表示该模型从损坏的 checkpoint 修复后验证")
-    print("(!) 表示 mAP50 异常低（可能使用了随机权重）")
     
     # 保存结果到 JSON
     output_file = "runs/validation_results.json"
