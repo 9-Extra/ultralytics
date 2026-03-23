@@ -47,7 +47,7 @@ def parse_args():
 
     # 训练超参数
     parser.add_argument("--epochs", type=int, default=100, help="训练轮数 (默认: 100)")
-    parser.add_argument("--batch", type=int, default=16, help="批次大小 (默认: 16)")
+    parser.add_argument("--batch", type=int, default=8, help="批次大小 (默认: 8)")
     parser.add_argument(
         "--imgsz", type=int, default=960, help="输入图像尺寸 (默认: 960)"
     )
@@ -88,6 +88,9 @@ def parse_args():
     )
     parser.add_argument(
         "--save-period", type=int, default=10, help="每 N 轮保存一次检查点 (默认: 10)"
+    )
+    parser.add_argument(
+        "--complie", type=bool, action="store_true", help="是否使用torch.complie"
     )
 
     return parser.parse_args()
@@ -143,22 +146,6 @@ def main():
         print(f"加载模型配置: {model_path}")
         model = YOLO(str(model_path))
 
-    # 设置 DetectGRL 的 grl_weight
-    def set_grl_weight(model, weight):
-        """递归设置 DetectGRL 模块的 grl_weight"""
-        count = 0
-        for module in model.modules():
-            if module.__class__.__name__ == "DetectGRL":
-                module.grl_weight = weight
-                count += 1
-        return count
-    
-    grl_count = set_grl_weight(model.model, args.grl_weight)
-    if grl_count > 0:
-        print(f"已设置 {grl_count} 个 DetectGRL 模块的 grl_weight = {args.grl_weight}")
-    else:
-        print("警告: 未找到 DetectGRL 模块，grl_weight 设置未生效")
-
     # 开始训练
     print("\n开始训练...\n")
     results = model.train(
@@ -171,6 +158,7 @@ def main():
         optimizer="MuSGD",
         deterministic=False,
         domain_loss_weight=args.domain_loss_weight,
+        grl_weight=args.grl_weight,
         device=args.device,
         workers=args.workers,
         project=args.project,
@@ -178,7 +166,7 @@ def main():
         patience=args.patience,
         save_period=args.save_period,
         amp=True,
-        compile=False,
+        compile=args.complie,
         cache="disk"
     )
 

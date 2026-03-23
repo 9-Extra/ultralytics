@@ -247,6 +247,16 @@ class DomainAdaptationTrainer(BaseTrainer):
         self.model.args = self.args  # attach hyperparameters to model
         if getattr(self.model, "end2end"):
             self.model.set_head_attr(max_det=self.args.max_det)
+        
+        # 设置 DetectGRL 的 grl_weight
+        grl_weight = getattr(self.args, "grl_weight", -0.1)
+        count = 0
+        for module in self.model.modules():
+            if module.__class__.__name__ == "DetectGRL":
+                module.grl_weight = grl_weight
+                count += 1
+        if count > 0:
+            LOGGER.info(f"已设置 {count} 个 DetectGRL 模块的 grl_weight = {grl_weight}")
 
     def get_model(self, cfg: str | None = None, weights: str | None = None, verbose: bool = True):
         """Return a YOLO domain adaptation detection model.
