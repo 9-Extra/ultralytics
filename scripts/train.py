@@ -66,6 +66,11 @@ def parse_args():
         default=-0.1,
         help="梯度反转层系数 (默认: -0.1)",
     )
+    parser.add_argument(
+        "--domain-batchnorm-update",
+        action="store_true",
+        help="使用目标域数据更新BatchNorm参数 (默认: False)",
+    )
 
     # 其他配置
     parser.add_argument(
@@ -90,7 +95,7 @@ def parse_args():
         "--save-period", type=int, default=10, help="每 N 轮保存一次检查点 (默认: 10)"
     )
     parser.add_argument(
-        "--complie", type=bool, action="store_true", help="是否使用torch.complie"
+        "--complie", action="store_true", help="是否使用torch.complie"
     )
 
     return parser.parse_args()
@@ -135,6 +140,7 @@ def main():
     print(f"图像尺寸: {args.imgsz}")
     print(f"域适应损失权重: {args.domain_loss_weight}")
     print(f"梯度反转层系数: {args.grl_weight}")
+    print(f"目标域BN更新: {args.domain_batchnorm_update}")
     print(f"设备: {args.device}")
     print("=" * 60)
 
@@ -159,6 +165,7 @@ def main():
         deterministic=False,
         domain_loss_weight=args.domain_loss_weight,
         grl_weight=args.grl_weight,
+        domain_batchnorm_update=args.domain_batchnorm_update,
         device=args.device,
         workers=args.workers,
         project=args.project,

@@ -17,6 +17,7 @@ from torch import distributed as dist
 from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
+from ultralytics.nn.modules.head import DetectGRL
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils.tqdm import TQDM
 from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK, colorstr
@@ -250,13 +251,12 @@ class DomainAdaptationTrainer(BaseTrainer):
         
         # 设置 DetectGRL 的 grl_weight
         grl_weight = getattr(self.args, "grl_weight", -0.1)
-        count = 0
-        for module in self.model.modules():
-            if module.__class__.__name__ == "DetectGRL":
-                module.grl_weight = grl_weight
-                count += 1
-        if count > 0:
-            LOGGER.info(f"已设置 {count} 个 DetectGRL 模块的 grl_weight = {grl_weight}")
+        head = self.model.model[-1]
+        if isinstance(head, DetectGRL):
+            head.grl_weight = grl_weight
+            LOGGER.info(f"已设置 DetectGRL 模块的 grl_weight = {grl_weight}")
+        else:
+            LOGGER.info(f"DetectGRL 模块未找到")
 
     def get_model(self, cfg: str | None = None, weights: str | None = None, verbose: bool = True):
         """Return a YOLO domain adaptation detection model.
@@ -438,10 +438,14 @@ class DomainAdaptationTrainer(BaseTrainer):
                     origin_domain_preds = preds["domain_pred"]
                     head = unwrap_model(self.model).model[-1]
                     backbone_neck = unwrap_model(self.model).model[:-1]  # 除 head 外的所有层
-                    # 冻结所有 BatchNorm 的统计量更新
-                    for m in backbone_neck:
-                        if isinstance(m, nn.BatchNorm2d):
-                            m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
+                    
+                    # 根据 domain_batchnorm_update 参数决定是否冻结 BatchNorm
+                    domain_batchnorm_update = self.args.domain_batchnorm_update
+                    if not domain_batchnorm_update:
+                        # 冻结所有 BatchNorm 的统计量更新，防止目标域数据影响 running statistics
+                        for m in backbone_neck.modules():
+                            if isinstance(m, nn.BatchNorm2d):
+                                m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
 
                     # 跳过目标域分类器
                     head.domain_classify_only = True                    
@@ -449,9 +453,10 @@ class DomainAdaptationTrainer(BaseTrainer):
                     
                     # 恢复训练模式
                     head.domain_classify_only = False
-                    for m in backbone_neck:
-                        if isinstance(m, nn.BatchNorm2d):
-                            m.train()
+                    if not domain_batchnorm_update:
+                        for m in backbone_neck.modules():
+                            if isinstance(m, nn.BatchNorm2d):
+                                m.train()
 
                     od_loss = torch.nn.functional.binary_cross_entropy_with_logits(origin_domain_preds, torch.zeros_like(origin_domain_preds), reduction="sum")
                     td_loss = torch.nn.functional.binary_cross_entropy_with_logits(target_domain_preds, torch.ones_like(target_domain_preds), reduction="sum")
