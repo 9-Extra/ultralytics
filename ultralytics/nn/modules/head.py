@@ -395,8 +395,9 @@ class DetectGRL(Detect):
     def fuse(self) -> None:
         """移除域预测头"""
         super().fuse()
-        self.domain_cls = None
-        self.domain_fusion = None
+        # 在直接验证时可以检查域分类器性能方便实验探索
+        # self.domain_cls = None
+        # self.domain_fusion = None
 
 
 class Segment(Detect):

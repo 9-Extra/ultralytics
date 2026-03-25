@@ -276,7 +276,7 @@ class DomainAdaptationTrainer(BaseTrainer):
 
     def get_validator(self):
         """Return a DomainAdaptationValidator for YOLO model validation."""
-        self.loss_names = "box_loss", "cls_loss", "dfl_loss"
+        self.loss_names = "box_loss", "cls_loss", "dfl_loss", "dom_loss"
         
         # Create target domain validation dataloader if target_data is available
         target_val_loader = None
@@ -433,9 +433,9 @@ class DomainAdaptationTrainer(BaseTrainer):
                     else:
                         loss, self.loss_items = self.model.loss(batch, preds)
 
-                    loss = loss.sum() # original_yolo_loss
+                    original_yolo_loss = loss.sum() # original_yolo_loss
                     
-                    origin_domain_preds = preds["domain_pred"]
+                    source_domain_preds = preds["domain_pred"]
                     head = unwrap_model(self.model).model[-1]
                     backbone_neck = unwrap_model(self.model).model[:-1]  # 除 head 外的所有层
                     
@@ -458,14 +458,14 @@ class DomainAdaptationTrainer(BaseTrainer):
                             if isinstance(m, nn.BatchNorm2d):
                                 m.train()
 
-                    od_loss = torch.nn.functional.binary_cross_entropy_with_logits(origin_domain_preds, torch.zeros_like(origin_domain_preds), reduction="sum")
+                    sd_loss = torch.nn.functional.binary_cross_entropy_with_logits(source_domain_preds, torch.zeros_like(source_domain_preds), reduction="sum")
                     td_loss = torch.nn.functional.binary_cross_entropy_with_logits(target_domain_preds, torch.ones_like(target_domain_preds), reduction="sum")
-                    domain_loss_weight = getattr(self.args, "domain_loss_weight", 1)
-                    domain_loss = (od_loss + td_loss) * domain_loss_weight
-                    loss += domain_loss
-                    self.loss_items += domain_loss.detach()
+                    domain_loss_weight = getattr(self.args, "domain_loss_weight", 0.2)
+                    domain_loss = (sd_loss + td_loss) * domain_loss_weight
                     
-                    self.loss = loss
+                    # 合并loss
+                    self.loss = original_yolo_loss + domain_loss
+                    self.loss_items =  torch.cat((self.loss_items, domain_loss.detach().unsqueeze_(dim=0)))
                     
                     if RANK != -1:
                         self.loss *= self.world_size

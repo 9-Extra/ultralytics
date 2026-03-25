@@ -130,7 +130,7 @@ YOLODA 模型支持以下域适应专用超参数：
 
 | 超参数 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `domain_loss_weight` | float | 1 | 域适应损失权重，控制域分类损失在总损失中的比重 |
+| `domain_loss_weight` | float | 0.2 | 域适应损失权重，控制域分类损失在总损失中的比重 |
 
 #### 设置方式
 
@@ -142,20 +142,20 @@ model = YOLO("yolo26n-da.yaml")
 model.train(
     data="source.yaml",
     target_data="target.yaml",
-    domain_loss_weight=1,  # 自定义域适应损失权重
+    domain_loss_weight=0.2,  # 自定义域适应损失权重
     epochs=100
 )
 ```
 
 **方式2：命令行设置**
 ```bash
-yolo detect train model=yolo26n-da.yaml data=source.yaml target_data=target.yaml domain_loss_weight=1
+yolo detect train model=yolo26n-da.yaml data=source.yaml target_data=target.yaml domain_loss_weight=0.2
 ```
 
 **方式3：通过自定义配置文件**
 创建 `custom.yaml`：
 ```yaml
-domain_loss_weight: 1
+domain_loss_weight: 0.2
 epochs: 100
 ```
 
@@ -172,7 +172,7 @@ args = dict(
     model="yolo26n-da.yaml",
     data="source.yaml",
     target_data="target.yaml",
-    domain_loss_weight=1,
+    domain_loss_weight=0.2,
     epochs=100
 )
 trainer = DomainAdaptationTrainer(overrides=args)

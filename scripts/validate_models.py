@@ -19,6 +19,15 @@ import torch
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+# 导入rich用于美化表格输出
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich import box
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+
 from ultralytics import YOLO
 from ultralytics.models.yolo.domain_adapt.val import DomainAdaptationValidator
 from ultralytics.utils import LOGGER
@@ -175,6 +184,12 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
         #     for k, v in c.items():
         #         m.write(f"{k}: {v}\n")
         m.write(validator.target_metrics.to_csv())
+        # 添加域分类指标
+        if validator.domain_stats is not None:
+            m.write("\n\n==================================\nDomain classification:\n")
+            m.write(f"loss,correct,error,total,accuracy\n")
+            stats = validator.domain_stats
+            m.write(f"{stats['loss']:.6f},{stats['correct']},{stats['error']},{stats['total']},{stats['accuracy']:.6f}\n")
     
     LOGGER.debug(f"Results keys: {list(results.keys())}")
     
@@ -192,6 +207,9 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
         "recall": results.get("target_metrics/recall(B)", 0),
     }
     
+    # 获取域分类准确率
+    domain_accuracy = validator.domain_stats.get("accuracy", 0) if validator.domain_stats else 0
+    
     # 检查结果是否合理
     if source_results["mAP50"] < 0.55:  # 随机模型约为 0.50
         LOGGER.warning(f"源域 mAP50 ({source_results['mAP50']:.4f}) 过低，可能使用了随机权重！")
@@ -202,6 +220,7 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
         "fixed_model_path": str(fixed_model_path) if do_fixed else None,
         "source": source_results,
         "target": target_results,
+        "domain_accuracy": domain_accuracy,
     }
 
 
@@ -303,26 +322,63 @@ def main():
             traceback.print_exc()
     
     # 打印汇总结果
-    print(f"\n{'='*90}")
+    print(f"\n{'='*105}")
     print("验证结果汇总")
-    print(f"{'='*90}\n")
+    print(f"{'='*105}\n")
     
-    print(f"{'模型':<30} {'源域 mAP50':>12} {'源域 mAP50-95':>14} {'目标域 mAP50':>14} {'目标域 mAP50-95':>16}")
-    print("-" * 90)
-    
-    for r in all_results:
-        model_name = r["model"]
-        src_map50 = r["source"]["mAP50"]
-        src_map5095 = r["source"]["mAP50-95"]
-        tgt_map50 = r["target"]["mAP50"]
-        tgt_map5095 = r["target"]["mAP50-95"]
+    if RICH_AVAILABLE:
+        # 使用rich表格输出
+        console = Console(width=140)  # 设置足够宽的宽度
+        table = Table(title="验证结果汇总", box=box.ROUNDED)
         
-        # 标记是否修复过
-        fixed_marker = "*" if r.get("fixed_model_path") else " "
-        print(f"{model_name:<29}{fixed_marker} {src_map50:>12.4f} {src_map5095:>14.4f} {tgt_map50:>14.4f} {tgt_map5095:>16.4f}")
-    
-    print("-" * 90)
-    print("* 表示该模型从损坏的 checkpoint 修复后验证")
+        # 添加列
+        table.add_column("模型", style="cyan", no_wrap=True, min_width=28)
+        table.add_column("源域 mAP50", justify="right", style="green", min_width=12)
+        table.add_column("源域 mAP50-95", justify="right", style="green", min_width=14)
+        table.add_column("目标域 mAP50", justify="right", style="blue", min_width=14)
+        table.add_column("目标域 mAP50-95", justify="right", style="blue", min_width=16)
+        table.add_column("域分类准确率", justify="right", style="magenta", min_width=14)
+        
+        # 添加数据行
+        for r in all_results:
+            model_name = r["model"]
+            # 标记是否修复过
+            if r.get("fixed_model_path"):
+                model_name = f"{model_name}*"
+            
+            table.add_row(
+                model_name,
+                f"{r['source']['mAP50']:.4f}",
+                f"{r['source']['mAP50-95']:.4f}",
+                f"{r['target']['mAP50']:.4f}",
+                f"{r['target']['mAP50-95']:.4f}",
+                f"{r.get('domain_accuracy', 0):.4f}",
+            )
+        
+        console.print(table)
+        print("\n* 表示该模型从损坏的 checkpoint 修复后验证")
+    else:
+        # 回退到普通文本输出
+        # 表头（手动对齐，中文字符显示宽度为2）
+        header = f"模型                          {'源域 mAP50':>12} {'源域 mAP50-95':>14} {'目标域 mAP50':>14} {'目标域 mAP50-95':>16} {'域分类准确率':>12}"
+        print(header)
+        print("-" * 105)
+        
+        for r in all_results:
+            model_name = r["model"][:26]  # 截断长名称
+            src_map50 = r["source"]["mAP50"]
+            src_map5095 = r["source"]["mAP50-95"]
+            tgt_map50 = r["target"]["mAP50"]
+            tgt_map5095 = r["target"]["mAP50-95"]
+            domain_acc = r.get("domain_accuracy", 0)
+            
+            # 标记是否修复过（显示在模型名称后面）
+            fixed_marker = "*" if r.get("fixed_model_path") else " "
+            row = f"{model_name:<27}{fixed_marker}{src_map50:>12.4f} {src_map5095:>14.4f} {tgt_map50:>14.4f} {tgt_map5095:>16.4f} {domain_acc:>12.4f}"
+            print(row)
+        
+        print("-" * 105)
+        print("* 表示该模型从损坏的 checkpoint 修复后验证")
     
     # 保存结果到 JSON
     output_file = "runs/validation_results.json"

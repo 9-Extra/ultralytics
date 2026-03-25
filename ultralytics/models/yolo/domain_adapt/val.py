@@ -46,6 +46,7 @@ class DomainAdaptationValidator(BaseValidator):
         self.metrics = DetMetrics()
         self.target_dataloader = target_dataloader
         self.target_metrics = DetMetrics() if target_dataloader is not None else None
+        self.domain_stats = None  # Domain classification statistics
     
     def _setup_model(self, trainer=None, model=None):
         """Setup model for validation.
@@ -126,7 +127,7 @@ class DomainAdaptationValidator(BaseValidator):
             desc_suffix (str): Suffix to add to progress bar description.
             
         Returns:
-            tuple: (dt, stats) - Profiling timers and validation statistics.
+            tuple: (dt, domain_pred) - Profiling timers and domain perdiction.
         """
         dt = (
             Profile(device=self.device),
@@ -141,6 +142,7 @@ class DomainAdaptationValidator(BaseValidator):
         else:
             self.jdict = []
         
+        domain_pred = []
         bar = TQDM(dataloader, desc=self.get_desc() + desc_suffix, total=len(dataloader))
         for batch_i, batch in enumerate(bar):
             self.run_callbacks("on_val_batch_start")
@@ -155,9 +157,19 @@ class DomainAdaptationValidator(BaseValidator):
 
             # Loss
             with dt[2]:
-                if self.training and desc_suffix == "":
-                    self.loss += model.loss(batch, preds)[1]
-
+                if self.training:
+                    # 计算检测 loss
+                    loss_items = model.loss(batch, preds)[1]
+                    if desc_suffix == "":
+                        # 源域：计算检测 loss，最后的domain_loss在__call__中计算后写入
+                        self.loss[:3] += loss_items
+                
+                # domain_loss作为重要指标无论是否训练都收集
+                actual_preds: dict = preds[1] # val模式下preds放在这里
+                # 收集 domain_pred，用于后续计算 domain_loss
+                if actual_preds.get("domain_pred", None) is not None:
+                    domain_pred.append(actual_preds["domain_pred"])
+                    
             # Postprocess
             with dt[3]:
                 preds = self.postprocess(preds)
@@ -170,7 +182,7 @@ class DomainAdaptationValidator(BaseValidator):
 
             self.run_callbacks("on_val_batch_end")
             
-        return dt
+        return dt, torch.cat(domain_pred) if len(domain_pred) > 0 else None
 
     @smart_inference_mode()
     def __call__(self, trainer=None, model=None):
@@ -191,21 +203,40 @@ class DomainAdaptationValidator(BaseValidator):
         
         self.run_callbacks("on_val_start")
         
+        has_target_domain = self.target_dataloader is not None and len(self.target_dataloader) > 0
         # Initialize metrics
         self.init_metrics(unwrap_model(model))
         
         # Validate on source domain
-        dt_source = self._validate_dataloader(self.dataloader, model, augment, desc_suffix="")
+        dt_source, source_domain_preds = self._validate_dataloader(self.dataloader, model, augment, desc_suffix="")
+        
         self.gather_stats(is_target=False)
         if RANK in {-1, 0}:
             stats = self.get_stats(is_target=False)
             self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt_source)))
             self.finalize_metrics(is_target=False)
             self.print_results(is_target=False)
-            
+
         # Validate on target domain if available
-        if self.target_dataloader is not None and len(self.target_dataloader) > 0:
-            dt_target = self._validate_dataloader(self.target_dataloader, model, augment, desc_suffix=" (target)")
+        if has_target_domain:
+            dt_target, target_domain_preds = self._validate_dataloader(self.target_dataloader, model, augment, desc_suffix=" (target)")
+            # 计算 domain_loss（需要同时有源域和目标域）
+            if source_domain_preds is not None and target_domain_preds is not None:
+                # 源域标签为 0，目标域标签为 1
+                source_labels = torch.zeros_like(source_domain_preds)
+                target_labels = torch.ones_like(target_domain_preds)
+                
+                # 拼接源域和目标域的预测和标签
+                all_preds = torch.cat((source_domain_preds, target_domain_preds), dim=0)
+                all_labels = torch.cat((source_labels, target_labels), dim=0)
+                
+                # 计算 BCE loss
+                domain_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                    all_preds, all_labels, reduction="sum"
+                ) * self.args.domain_loss_weight
+            else:
+                domain_loss = torch.tensor(0.0, device=self.device) # Yolov26原始模型没有域分类头，相关指标为0           
+            
             self.gather_stats(is_target=True)
             if RANK in {-1, 0}:
                 self.target_speed = dict(zip(self.speed.keys(), (x.t / len(self.target_dataloader.dataset) * 1e3 for x in dt_target)))
@@ -213,9 +244,16 @@ class DomainAdaptationValidator(BaseValidator):
                 # Add target_ prefix to target domain metrics
                 target_stats = {f"target_{k}": v for k, v in target_stats.items()}
                 self.finalize_metrics(is_target=True)
+                # 计算域分类统计信息
+                self._compute_domain_stats(source_domain_preds, target_domain_preds, domain_loss)
                 self.print_results(is_target=True)
         else:
             dt_target = None
+            domain_loss = torch.tensor(0.0, device=self.device) # 只有源域则 domain_loss 保持为 0
+            
+        
+        if self.training:
+            self.loss[3] = domain_loss.detach() # 写入domain_loss
         
         if RANK in {-1, 0}:
             self.run_callbacks("on_val_end")
@@ -226,10 +264,12 @@ class DomainAdaptationValidator(BaseValidator):
             loss = self.loss.clone().detach()
             if trainer.world_size > 1:
                 dist.reduce(loss, dst=0, op=dist.ReduceOp.AVG)
+            
             if RANK > 0:
                 return
+            
             # Merge source and target stats, add target_ prefix to target metrics
-            results = {**stats, **target_stats, **trainer.label_loss_items(loss.cpu() / len(self.dataloader), prefix="val")}
+            results = {**stats, **target_stats, **trainer.label_loss_items(loss / len(self.dataloader), prefix="val")}
             
             return {k: round(float(v), 5) for k, v in results.items()}  # return results as 5 decimal place floats
         else:
@@ -488,6 +528,51 @@ class DomainAdaptationValidator(BaseValidator):
         metrics.clear_stats()
         return metrics.results_dict
 
+    def _compute_domain_stats(self, source_preds: torch.Tensor, target_preds: torch.Tensor, domain_loss: torch.Tensor) -> None:
+        """Compute domain classification statistics and store in self.domain_stats.
+        
+        Args:
+            source_preds: Source domain predictions (logits).
+            target_preds: Target domain predictions (logits).
+            domain_loss: Domain classification loss.
+        """
+        if source_preds is None or target_preds is None:
+            self.domain_stats = {
+                "loss": domain_loss.item(),
+                "correct": 0,
+                "error": 0,
+                "total": 0,
+                "accuracy": 0,
+            }
+            return
+        
+        # 将 logits 转换为预测标签 (>=0.5 预测为目标域/1, <0.5 预测为源域/0)
+        source_pred_labels = (source_preds >= 0).long()  # sigmoid(0) = 0.5
+        target_pred_labels = (target_preds >= 0).long()
+        
+        # 源域标签为 0，目标域标签为 1
+        source_true_labels = torch.zeros_like(source_pred_labels)
+        target_true_labels = torch.ones_like(target_pred_labels)
+        
+        # 计算正确数和错误数
+        source_correct = (source_pred_labels == source_true_labels).sum().item()
+        source_error = source_pred_labels.numel() - source_correct
+        target_correct = (target_pred_labels == target_true_labels).sum().item()
+        target_error = target_pred_labels.numel() - target_correct
+        
+        correct = source_correct + target_correct
+        error = source_error + target_error
+        total = correct + error
+        accuracy = correct / total if total > 0 else 0.0
+        
+        self.domain_stats = {
+            "loss": domain_loss.item(),
+            "correct": correct,
+            "error": error,
+            "total": total,
+            "accuracy": accuracy,
+        }
+    
     def print_results(self, is_target: bool = False) -> None:
         """Print training/validation set metrics per class.
         
@@ -515,6 +600,14 @@ class DomainAdaptationValidator(BaseValidator):
                         *metrics.class_result(i),
                     )
                 )
+        
+        # Print domain classification results if available (only for target domain validation)
+        if is_target and self.domain_stats is not None:
+            # Print header for domain classification metrics
+            LOGGER.info(f"{'Domain Metrics:':>22}{'loss':>11s}{'correct':>11s}{'error':>11s}{'total':>11s}{'accuracy':>11s}")
+            LOGGER.info(
+                f"{'Domain:':>22}{self.domain_stats['loss']:>11.3f}{self.domain_stats['correct']:>11d}{self.domain_stats['error']:>11d}{self.domain_stats['total']:>11d}{self.domain_stats['accuracy']:>11.3f}"
+            )
 
     def _process_batch(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> dict[str, np.ndarray]:
         """Return correct prediction matrix.

@@ -57,8 +57,8 @@ def parse_args():
     parser.add_argument(
         "--domain-loss-weight",
         type=float,
-        default=1,
-        help="域适应损失权重 (默认: 1)",
+        default=0.2,
+        help="域适应损失权重 (默认: 0.2)",
     )
     parser.add_argument(
         "--grl-weight",

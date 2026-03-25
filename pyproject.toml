@@ -75,6 +75,7 @@ dependencies = [
     "polars>=0.20.0",
     "ultralytics-thop>=2.0.18", # FLOPs computation https://github.com/ultralytics/thop
     "dowhen>=0.1.0",
+    "rich>=14.3.3",
 ]
 
 # Optional dependencies ------------------------------------------------------------------------------------------------
