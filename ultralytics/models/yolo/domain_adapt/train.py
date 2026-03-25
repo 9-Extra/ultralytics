@@ -422,7 +422,6 @@ class DomainAdaptationTrainer(BaseTrainer):
                             x["momentum"] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
 
                 # Forward
-            
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
                     
@@ -463,9 +462,21 @@ class DomainAdaptationTrainer(BaseTrainer):
                     domain_loss_weight = getattr(self.args, "domain_loss_weight", 0.2)
                     domain_loss = (sd_loss + td_loss) * domain_loss_weight
                     
+                    # 计算域分类准确率
+                    with torch.no_grad():
+                        # Source domain: 预测 < 0.5 为正确 (label=0)
+                        source_correct = (source_domain_preds < 0).sum().item()
+                        # Target domain: 预测 >= 0.5 为正确 (label=1)
+                        target_correct = (target_domain_preds >= 0).sum().item()
+                        total_samples = source_domain_preds.numel() + target_domain_preds.numel()
+                        domain_correct = source_correct + target_correct
+                        domain_accuracy = domain_correct / total_samples if total_samples > 0 else 0.0
+                    
                     # 合并loss
                     self.loss = original_yolo_loss + domain_loss
                     self.loss_items =  torch.cat((self.loss_items, domain_loss.detach().unsqueeze_(dim=0)))
+                    # 保存域分类准确率用于后续 metrics
+                    self.domain_acc = domain_accuracy
                     
                     if RANK != -1:
                         self.loss *= self.world_size
@@ -539,7 +550,7 @@ class DomainAdaptationTrainer(BaseTrainer):
 
             self.nan_recovery_attempts = 0
             if RANK in {-1, 0}:
-                self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
+                self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr, "domain_acc": getattr(self, "domain_acc", 0.0)})
                 self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
                 if self.args.time:
                     self.stop |= (time.time() - self.train_time_start) > (self.args.time * 3600)

@@ -53,6 +53,44 @@ def get_dataloader(dataset_path, args, data, batch_size=16):
     )
 
 
+def create_base_args(batch_size, imgsz, device="", plots=False, verbose=False, half=False):
+    """
+    创建基础配置参数
+    
+    Args:
+        batch_size: 批次大小
+        imgsz: 输入图像大小
+        device: 设备
+        plots: 是否保存绘图
+        verbose: 是否详细输出
+        half: 是否使用半精度
+    
+    Returns:
+        args: 配置好的参数对象
+    """
+    args = get_cfg()
+    args.batch = batch_size
+    args.imgsz = imgsz
+    args.device = device
+    args.workers = 8
+    args.conf = 0.001
+    args.iou = 0.6
+    args.max_det = 300
+    args.single_cls = False
+    args.augment = False
+    args.task = "detect"
+    args.split = "val"
+    args.plots = plots
+    args.verbose = verbose
+    args.save_json = False
+    args.save_txt = False
+    args.half = half
+    args.rect = False
+    args.dnn = False
+    args.end2end = None
+    return args
+
+
 def fix_checkpoint(model_path):
     """
     修复训练崩溃的 checkpoint，提取 ema 模型保存为正确的格式
@@ -131,29 +169,10 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     # 从数据加载器获取数据集路径
     source_data = source_dataloader.dataset.data.get("yaml_file", "")
     
-    # 准备参数
-    args = get_cfg()
+    # 准备参数（基于基础配置，设置验证专用参数）
+    args = create_base_args(batch_size, imgsz, device, plots=True, verbose=True, half=True)
     args.model = str(fixed_model_path)
     args.data = source_data
-    args.batch = batch_size
-    args.imgsz = imgsz
-    args.device = device
-    args.workers = 8
-    args.conf = 0.001
-    args.iou = 0.6
-    args.max_det = 300
-    args.single_cls = False
-    args.augment = False
-    args.task = "detect"
-    args.split = "val"
-    args.plots = True
-    args.verbose = True
-    args.save_json = False
-    args.save_txt = False
-    args.half = True
-    args.rect = False
-    args.dnn = False
-    args.end2end = None
     
     save_dir = Path("runs/validate") / model_name
     
@@ -264,34 +283,16 @@ def main():
     
     print(f"发现 {len(model_dirs)} 个模型需要验证")
     
-    # 准备参数用于数据加载器
-    args = get_cfg()
-    args.batch = batch_size
-    args.imgsz = imgsz
-    args.workers = 8
-    args.conf = 0.001
-    args.iou = 0.6
-    args.max_det = 300
-    args.single_cls = False
-    args.augment = False
-    args.task = "detect"
-    args.split = "val"
-    args.plots = False
-    args.verbose = False
-    args.save_json = False
-    args.save_txt = False
-    args.half = False
-    args.rect = False
-    args.dnn = False
-    args.end2end = None
+    # 准备参数用于数据加载器（使用基础配置）
+    args = create_base_args(batch_size, imgsz, device, plots=False, verbose=False, half=False)
     
     # 检查数据集
     data = check_det_dataset(source_data)
     target_data_dict = check_det_dataset(target_data)
     
     # 构建数据加载器
-    source_dataloader = get_dataloader(data.get("val"), args, data, batch_size)
-    target_dataloader = get_dataloader(target_data_dict.get("val"), args, target_data_dict, batch_size)
+    source_dataloader = get_dataloader(data.get(args.split), args, data, batch_size)
+    target_dataloader = get_dataloader(target_data_dict.get(args.split), args, target_data_dict, batch_size)
     print("数据集加载完成！\n")
     
     # 存储所有结果
