@@ -17,6 +17,7 @@ from torch import distributed as dist
 from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
+from ultralytics.utils.loss import DomainLoss
 from ultralytics.nn.modules.head import DetectGRL
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils.tqdm import TQDM
@@ -565,13 +566,11 @@ class DomainAdaptationTrainer(BaseTrainer):
                             if isinstance(m, nn.BatchNorm2d):
                                 m.train()
 
-                    source_labels = torch.zeros_like(source_domain_preds)
-                    target_labels = torch.ones_like(target_domain_preds)
-
-                    all_preds = torch.cat((source_domain_preds, target_domain_preds), dim=0)
-                    all_labels = torch.cat((source_labels, target_labels), dim=0)
-
-                    domain_loss = torch.nn.functional.binary_cross_entropy_with_logits(all_preds, all_labels, reduction="sum") * self.args.domain_loss_weight
+                    # 使用 DomainLoss 计算 domain_loss（包含标签平滑）
+                    domain_loss = DomainLoss(epsilon=0.1)(
+                        source_domain_preds,
+                        target_domain_preds,
+                    ) * self.args.domain_loss_weight
             
                     # 计算域分类准确率
                     with torch.no_grad():

@@ -22,7 +22,7 @@ from ultralytics.utils import LOGGER, RANK, TQDM, callbacks, colorstr, emojis
 from ultralytics.utils.checks import check_imgsz
 from ultralytics.utils.ops import Profile
 from ultralytics.utils.torch_utils import attempt_compile, select_device, smart_inference_mode, unwrap_model
-
+from ultralytics.utils.loss import DomainLoss
 
 
 class DomainAdaptationValidator(BaseValidator):
@@ -222,17 +222,10 @@ class DomainAdaptationValidator(BaseValidator):
             dt_target, target_domain_preds = self._validate_dataloader(self.target_dataloader, model, augment, desc_suffix=" (target)")
             # 计算 domain_loss（需要同时有源域和目标域）
             if source_domain_preds is not None and target_domain_preds is not None:
-                # 源域标签为 0，目标域标签为 1
-                source_labels = torch.zeros_like(source_domain_preds)
-                target_labels = torch.ones_like(target_domain_preds)
-                
-                # 拼接源域和目标域的预测和标签
-                all_preds = torch.cat((source_domain_preds, target_domain_preds), dim=0)
-                all_labels = torch.cat((source_labels, target_labels), dim=0)
-                
-                # 计算 BCE loss
-                domain_loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                    all_preds, all_labels, reduction="sum"
+                # 使用 DomainLoss 计算 domain_loss（包含标签平滑）
+                domain_loss = DomainLoss(epsilon=0.1)(
+                    source_domain_preds,
+                    target_domain_preds
                 ) * self.args.domain_loss_weight
             else:
                 domain_loss = torch.tensor(0.0, device=self.device) # Yolov26原始模型没有域分类头，相关指标为0           

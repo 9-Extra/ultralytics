@@ -18,6 +18,57 @@ from .metrics import bbox_iou, probiou
 from .tal import bbox2dist, rbox2dist
 
 
+class DomainLoss(nn.Module):
+    """Domain classification loss with label smoothing for domain adaptation.
+
+    Implements the domain classification loss used in domain adaptation tasks to distinguish
+    between source and target domain features. Uses binary cross-entropy with label smoothing
+    to prevent overconfidence.
+
+    Attributes:
+        epsilon (float): Label smoothing parameter. Source domain is labeled as epsilon,
+            target domain is labeled as 1 - epsilon.
+
+    Examples:
+        >>> domain_loss = DomainLoss(epsilon=0.1)
+        >>> loss = domain_loss(source_preds, target_preds)
+    """
+
+    def __init__(self, epsilon: float = 0.1):
+        """Initialize DomainLoss with label smoothing parameter.
+
+        Args:
+            epsilon: Label smoothing parameter. Default is 0.1.
+        """
+        super().__init__()
+        self.epsilon = epsilon
+
+    def forward(
+        self,
+        source_domain_preds: torch.Tensor,
+        target_domain_preds: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute domain classification loss with label smoothing.
+
+        Args:
+            source_domain_preds: Domain predictions for source domain samples, shape (batch_size,).
+            target_domain_preds: Domain predictions for target domain samples, shape (batch_size,).
+
+        Returns:
+            torch.Tensor: The computed domain classification loss.
+        """
+        # Apply label smoothing: source = epsilon, target = 1 - epsilon
+        source_labels = torch.full_like(source_domain_preds, self.epsilon)
+        target_labels = torch.full_like(target_domain_preds, 1.0 - self.epsilon)
+
+        # Concatenate predictions and smoothed labels
+        all_preds = torch.cat((source_domain_preds, target_domain_preds), dim=0)
+        all_labels = torch.cat((source_labels, target_labels), dim=0)
+
+        # Compute BCE loss with label smoothing
+        return F.binary_cross_entropy_with_logits(all_preds, all_labels, reduction="sum")
+
+
 class VarifocalLoss(nn.Module):
     """Varifocal loss by Zhang et al.
 
