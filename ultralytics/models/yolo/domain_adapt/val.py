@@ -532,38 +532,38 @@ class DomainAdaptationValidator(BaseValidator):
         if source_preds is None or target_preds is None:
             self.domain_stats = {
                 "loss": domain_loss.item(),
-                "correct": 0,
-                "error": 0,
                 "total": 0,
                 "accuracy": 0,
+                "precision": 0,
+                "recall": 0,
             }
             return
         
         # 将 logits 转换为预测标签 (>=0.5 预测为目标域/1, <0.5 预测为源域/0)
-        source_pred_labels = (source_preds >= 0).long()  # sigmoid(0) = 0.5
-        target_pred_labels = (target_preds >= 0).long()
+        source_correct = (source_preds < 0).sum().item()  # sigmoid(0) = 0.5
+        target_correct = (target_preds >= 0).sum().item()
         
-        # 源域标签为 0，目标域标签为 1
-        source_true_labels = torch.zeros_like(source_pred_labels)
-        target_true_labels = torch.ones_like(target_pred_labels)
+        source_count = source_preds.numel()
+        target_count = target_preds.numel()
+        total = source_count + target_count
+        accuracy = (source_correct + target_correct) / total if total > 0 else 0.0
         
-        # 计算正确数和错误数
-        source_correct = (source_pred_labels == source_true_labels).sum().item()
-        source_error = source_pred_labels.numel() - source_correct
-        target_correct = (target_pred_labels == target_true_labels).sum().item()
-        target_error = target_pred_labels.numel() - target_correct
+        # 计算 precision 和 recall (将目标域视为正类 1)
+        # TP: 目标域预测正确数, FP: 源域预测错误数(预测为目标域)
+        # TN: 源域预测正确数, FN: 目标域预测错误数(预测为源域)
+        tp = target_correct
+        fp = source_count - source_correct
+        fn = target_count - target_correct
         
-        correct = source_correct + target_correct
-        error = source_error + target_error
-        total = correct + error
-        accuracy = correct / total if total > 0 else 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         
         self.domain_stats = {
             "loss": domain_loss.item(),
-            "correct": correct,
-            "error": error,
             "total": total,
             "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
         }
     
     def print_results(self, is_target: bool = False) -> None:
@@ -597,9 +597,9 @@ class DomainAdaptationValidator(BaseValidator):
         # Print domain classification results if available (only for target domain validation)
         if is_target and self.domain_stats is not None:
             # Print header for domain classification metrics
-            LOGGER.info(f"{'Domain Metrics:':>22}{'loss':>11s}{'correct':>11s}{'error':>11s}{'total':>11s}{'accuracy':>11s}")
+            LOGGER.info(f"{'Domain Metrics:':>22}{'loss':>11s}{'accuracy':>11s}{'precision':>11s}{'recall':>11s}")
             LOGGER.info(
-                f"{'Domain:':>22}{self.domain_stats['loss']:>11.3f}{self.domain_stats['correct']:>11d}{self.domain_stats['error']:>11d}{self.domain_stats['total']:>11d}{self.domain_stats['accuracy']:>11.3f}"
+                f"{'Domain:':>22}{self.domain_stats['loss']:>11.3f}{self.domain_stats['accuracy']:>11.3f}{self.domain_stats['precision']:>11.3f}{self.domain_stats['recall']:>11.3f}"
             )
 
     def _process_batch(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> dict[str, np.ndarray]:

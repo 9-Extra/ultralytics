@@ -332,7 +332,6 @@ class DetectGRL(Detect):
         # 融合层：1x1卷积，用于融合所有层的特征
         # 输入通道总数 = 16 * 层数，输出 = 1（二分类）
         self.domain_fusion = nn.Conv2d(16 * self.nl, 1, 1)
-        self.domain_classify_only = False
     
     @property
     def grl_weight(self) -> float:
@@ -343,6 +342,7 @@ class DetectGRL(Detect):
     def grl_weight(self, value: float):
         for seq in self.domain_cls:
             seq[0].weight = value
+            pass
         
     def predict_domain(self, x: list[torch.Tensor]) -> torch.Tensor | None:
         """预测图像属于源域还是目标域，输出形状为[batch_size]的向量，规定源域为0，目标域为1"""
@@ -370,10 +370,6 @@ class DetectGRL(Detect):
         self, x: list[torch.Tensor]
     ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """拼接并返回预测的边界框、类别概率和域预测结果。"""
-        if self.domain_classify_only: # short cut
-            preds = dict(domain_pred=self.predict_domain(x))
-            return preds
-        
         preds = self.forward_head(x, **self.one2many)
             
         if self.end2end:

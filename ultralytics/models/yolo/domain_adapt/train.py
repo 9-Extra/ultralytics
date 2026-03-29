@@ -21,7 +21,7 @@ from ultralytics.utils.loss import DomainLoss
 from ultralytics.nn.modules.head import DetectGRL
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils.tqdm import TQDM
-from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK, colorstr
+from ultralytics.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, RANK, colorstr
 from ultralytics.utils.patches import override_configs
 from ultralytics.utils.plotting import plot_images, plot_labels
 from ultralytics.utils.torch_utils import (
@@ -30,6 +30,44 @@ from ultralytics.utils.torch_utils import (
     unset_deterministic,
     unwrap_model,
 )
+
+def split_dict_into_two(data: dict | torch.Tensor, dim=0):
+    """
+    将dict中所有tensor分割成两个（沿着指定维度）
+    
+    Args:
+        data: 输入的dict
+        dim: 分割的维度
+    
+    Returns:
+        两个相同结构的dict
+    """
+    if isinstance(data, dict):
+        dict1 = {}
+        dict2 = {}
+        
+        for key, value in data.items():
+            val1, val2 = split_dict_into_two(value, dim)
+            dict1[key] = val1
+            dict2[key] = val2
+        
+        return dict1, dict2
+    elif isinstance(data, list):
+        list1 = []
+        list2 = []
+        
+        for item in data:
+            item1, item2 = split_dict_into_two(item, dim)
+            list1.append(item1)
+            list2.append(item2)
+        
+        return list1, list2
+        
+    elif isinstance(data, torch.Tensor):
+        return torch.chunk(data, 2, dim)
+    else:
+        raise RuntimeError(f"包含意外的类型{type(data)}")
+
 
 
 class DomainAdaptationTrainer(BaseTrainer):
@@ -179,10 +217,17 @@ class DomainAdaptationTrainer(BaseTrainer):
             (DataLoader): 源域数据加载器（训练时还会创建目标域数据加载器）。
         """
         assert mode in {"train", "val"}, f"Mode must be 'train' or 'val', not {mode}."
-        with torch_distributed_zero_first(
-            rank
-        ):  # init dataset *.cache only once if DDP
-            dataset = self.build_dataset(dataset_path, mode, batch_size)
+        if self.args.domain_batchnorm_update and mode == "train":
+            assert batch_size % 2 == 0, "batch_size需要减半"
+            batch_size = batch_size // 2
+        
+        with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
+            dataset = self.build_dataset(
+                dataset_path,
+                mode, 
+                batch_size
+            )
+        
         shuffle = mode == "train"
         if (
             getattr(dataset, "rect", False)
@@ -204,30 +249,48 @@ class DomainAdaptationTrainer(BaseTrainer):
             drop_last=self.args.compile and mode == "train",
         )
 
-        # 只在训练模式下创建目标域数据加载器
-        if mode == "train" and self.target_data:
-            with torch_distributed_zero_first(rank):
-                target_dataset = self.build_dataset(
-                    self.target_data.get("train", self.target_data.get("path")),
-                    mode="train",
-                    batch=batch_size,
-                    data=self.target_data,
-                )
-                self.target_train_loader = build_dataloader(
-                    target_dataset,
-                    batch=batch_size,
-                    workers=self.args.workers,
-                    shuffle=True,
-                    rank=rank,
-                    drop_last=self.args.compile,
-                )
-                # 创建迭代器，用于循环获取目标域数据
-                self.target_iter = iter(self.target_train_loader)
-                LOGGER.info(
-                    f"目标域数据加载器创建完成，共 {len(target_dataset)} 张图像"
-                )
-
         return loader
+    
+    def _prepare_domain_dataloader(self, dataset_path: str, batch_size: int = 16, rank: int = 0, mode: str = "train"):
+        assert self.target_data, "目标域数据集不存在"
+        
+        if self.args.domain_batchnorm_update and mode == "train":
+            # 这里mode == "train"其实一定成立 
+            assert batch_size % 2 == 0, "batch_size需要减半"
+            batch_size = batch_size // 2
+        
+        with torch_distributed_zero_first(rank):
+            target_dataset = self.build_dataset(
+                dataset_path,
+                mode=mode,
+                batch=batch_size,
+                data=self.target_data,
+            )
+            
+        shuffle = mode == "train"
+        if (
+            getattr(target_dataset, "rect", False)
+            and shuffle
+            and not np.all(target_dataset.batch_shapes == target_dataset.batch_shapes[0])
+        ):
+            LOGGER.warning(
+                "'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False"
+            )
+            shuffle = False
+            
+        self.target_train_loader = build_dataloader(
+            target_dataset,
+            batch=batch_size,
+            workers=self.args.workers if mode == "train" else self.args.workers * 2,
+            shuffle=shuffle,
+            rank=rank,
+            drop_last=self.args.compile and mode == "train",
+        )
+        # 创建迭代器，用于循环获取目标域数据
+        self.target_iter = iter(self.target_train_loader)
+        LOGGER.info(
+            f"目标域数据加载器创建完成，共 {len(target_dataset)} 张图像"
+        )
 
     def preprocess_batch(self, batch: dict) -> dict:
         """预处理批次数据，包括源域和目标域图像。
@@ -342,13 +405,15 @@ class DomainAdaptationTrainer(BaseTrainer):
         # Create target domain validation dataloader if target_data is available
         target_val_loader = None
         if hasattr(self, "target_data") and self.target_data is not None:
+            batch_size = self.batch_size // max(self.world_size, 1)
+            
             try:
-                target_val_path = self.target_data.get(
-                    self.args.split
-                ) or self.target_data.get("val")
+                target_val_path = self.target_data.get(self.args.split) or self.target_data.get("val")
                 if target_val_path:
                     target_val_loader = self.get_dataloader(
-                        target_val_path, self.args.batch, mode="val"
+                        target_val_path,
+                        batch_size if self.args.task == "obb" else batch_size * 2, 
+                        mode="val"
                     )
                     LOGGER.info(f"目标域验证数据加载器创建完成，用于验证阶段")
             except Exception as e:
@@ -442,6 +507,17 @@ class DomainAdaptationTrainer(BaseTrainer):
         if self.world_size > 1:
             self._setup_ddp()
         self._setup_train()
+        self._prepare_domain_dataloader(
+            self.target_data.get("train", self.target_data.get("path")), 
+            batch_size=self.batch_size // max(self.world_size, 1), 
+            rank=LOCAL_RANK, 
+            mode="train"
+        )
+        
+        head = unwrap_model(self.model).model[-1]
+        backbone_neck = unwrap_model(self.model).model[
+            :-1
+        ]  # 除 head 外的所有层
 
         nb = len(self.train_loader)  # number of batches
         nw = (
@@ -529,8 +605,35 @@ class DomainAdaptationTrainer(BaseTrainer):
                 # Forward
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
+                    
+                    # 前向传播
+                    if self.args.domain_batchnorm_update:
+                        # 合并两个域的图像一并推理，然后再切分开
+                        all_images = torch.cat((batch["img"], batch["domain_img"]), dim=0)
+                        preds, target_preds = split_dict_into_two(self.model(all_images))
+                    else:
+                        # 原域正常推理
+                        preds = self.model(batch["img"])
+                        # 冻结所有 BatchNorm 的统计量更新，防止目标域数据影响 running statistics
+                        orginal_stats = {}
+                        for m in backbone_neck.modules():
+                            if isinstance(m, nn.BatchNorm2d):
+                                orginal_stats[m] = m.track_running_stats
+                                m.track_running_stats = False
+                                # m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
+                        
+                        # 目标域推理
+                        target_preds = self.model(batch["domain_img"])
 
-                    preds = self.model(batch["img"])
+                        # 恢复
+                        for m in backbone_neck.modules():
+                            if isinstance(m, nn.BatchNorm2d):
+                                m.track_running_stats = orginal_stats[m]
+                                # m.train()
+                    pass
+                
+                    # 计算loss
+                    # 使用原域推理结果计算Yolo的loss
                     if self.args.compile:
                         # Decouple inference and loss calculations for improved compile performance
                         loss, self.loss_items = unwrap_model(self.model).loss(
@@ -542,36 +645,25 @@ class DomainAdaptationTrainer(BaseTrainer):
                     original_yolo_loss = loss.sum()  # original_yolo_loss
 
                     source_domain_preds = preds["domain_pred"]
-                    head = unwrap_model(self.model).model[-1]
-                    backbone_neck = unwrap_model(self.model).model[
-                        :-1
-                    ]  # 除 head 外的所有层
-
-                    # 根据 domain_batchnorm_update 参数决定是否冻结 BatchNorm
-                    domain_batchnorm_update = self.args.domain_batchnorm_update
-                    if not domain_batchnorm_update:
-                        # 冻结所有 BatchNorm 的统计量更新，防止目标域数据影响 running statistics
-                        for m in backbone_neck.modules():
-                            if isinstance(m, nn.BatchNorm2d):
-                                m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
-
-                    # 跳过目标域分类器
-                    head.domain_classify_only = True
-                    target_domain_preds = self.model(batch["domain_img"])["domain_pred"]
-
-                    # 恢复训练模式
-                    head.domain_classify_only = False
-                    if not domain_batchnorm_update:
-                        for m in backbone_neck.modules():
-                            if isinstance(m, nn.BatchNorm2d):
-                                m.train()
+                    target_domain_preds = target_preds["domain_pred"]
 
                     # 使用 DomainLoss 计算 domain_loss（包含标签平滑）
                     domain_loss = DomainLoss(epsilon=0.1)(
                         source_domain_preds,
                         target_domain_preds,
                     ) * self.args.domain_loss_weight
-            
+        
+                    # 在domain_batchnorm_update=False时，目标域的分类logit可能为nan，因此需要修补
+                    if domain_loss.isnan().any():
+                        breakpoint()
+                        target_domain_preds = unwrap_model(self.model)(batch["domain_img"])["domain_pred"]
+    
+                    # 合并loss
+                    self.loss = original_yolo_loss + domain_loss
+                    self.loss_items = torch.cat(
+                        (self.loss_items, domain_loss.detach().unsqueeze_(dim=0))
+                    )
+                    
                     # 计算域分类准确率
                     with torch.no_grad():
                         # Source domain: 预测 < 0.5 为正确 (label=0)
@@ -586,11 +678,6 @@ class DomainAdaptationTrainer(BaseTrainer):
                             domain_correct / total_samples if total_samples > 0 else 0.0
                         )
 
-                    # 合并loss
-                    self.loss = original_yolo_loss + domain_loss
-                    self.loss_items = torch.cat(
-                        (self.loss_items, domain_loss.detach().unsqueeze_(dim=0))
-                    )
                     # 保存域分类准确率用于后续 metrics
                     self.domain_acc = domain_accuracy
 

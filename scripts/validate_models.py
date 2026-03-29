@@ -91,47 +91,6 @@ def create_base_args(batch_size, imgsz, device="", plots=False, verbose=False, h
     return args
 
 
-def fix_checkpoint(model_path):
-    """
-    修复训练崩溃的 checkpoint，提取 ema 模型保存为正确的格式
-    
-    Returns:
-        str: 修复后的模型路径（如果是 checkpoint），否则返回原路径
-    """
-    model_path = Path(model_path).resolve()  # 转为绝对路径
-    
-    try:
-        ckpt = torch.load(model_path, map_location='cpu', weights_only=False)
-        
-        # 检查是否是损坏的 checkpoint（model 为 None 但有 ema）
-        if ckpt.get('model') is None and ckpt.get('ema') is not None:
-            LOGGER.warning(f"检测到损坏的 checkpoint: {model_path}")
-            print(f"Epoch: {ckpt.get('epoch')}, Best fitness: {ckpt.get('best_fitness')}")
-            
-            # 创建修复后的模型文件
-            fixed_path = str(model_path).replace('.pt', '_fixed.pt')
-            
-            # 从 ema 提取模型并保存完整 checkpoint
-            ema_model = ckpt['ema']
-            
-            # 保存为标准的 YOLO checkpoint 格式（ema 已经是模型对象）
-            torch.save({
-                'model': ema_model,  # 直接保存模型对象，不是 state_dict
-                'ema': None,
-                'epoch': ckpt.get('epoch'),
-                'best_fitness': ckpt.get('best_fitness'),
-                'date': ckpt.get('date'),
-            }, fixed_path)
-            
-            print(f"已修复并保存到: {fixed_path}")
-            return fixed_path, True
-        
-        return str(model_path), False
-    except Exception as e:
-        LOGGER.warning(f"检查 checkpoint 时出错: {e}")
-        return str(model_path), False
-
-
 def validate_model(model_path, source_dataloader, target_dataloader, batch_size=16, imgsz=640, device=""):
     """
     验证单个模型在源域和目标域上的性能
@@ -156,14 +115,9 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     print(f"设备: {device if device else 'auto'}")
     print(f"{'='*60}\n")
     
-    # 修复可能的损坏 checkpoint
-    fixed_model_path, do_fixed = fix_checkpoint(model_path)
-    fixed_model_path = Path(fixed_model_path).resolve()
-    print(f"使用模型路径: {fixed_model_path}")
-    
     # 检查文件是否存在
-    if not fixed_model_path.exists():
-        LOGGER.error(f"模型文件不存在: {fixed_model_path}")
+    if not model_path.exists():
+        LOGGER.error(f"模型文件不存在: {model_path}")
         return None
     
     # 从数据加载器获取数据集路径
@@ -171,7 +125,7 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     
     # 准备参数（基于基础配置，设置验证专用参数）
     args = create_base_args(batch_size, imgsz, device, plots=True, verbose=True, half=True)
-    args.model = str(fixed_model_path)
+    args.model = str(model_path)
     args.data = source_data
     
     save_dir = Path("runs/validate") / model_name
@@ -206,9 +160,9 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
         # 添加域分类指标
         if validator.domain_stats is not None:
             m.write("\n\n==================================\nDomain classification:\n")
-            m.write(f"loss,correct,error,total,accuracy\n")
+            m.write(f"loss,accuracy,precision,recall,total\n")
             stats = validator.domain_stats
-            m.write(f"{stats['loss']:.6f},{stats['correct']},{stats['error']},{stats['total']},{stats['accuracy']:.6f}\n")
+            m.write(f"{stats['loss']:.6f},{stats['accuracy']:.6f},{stats['precision']:.6f},{stats['recall']:.6f},{stats['total']}\n")
     
     LOGGER.debug(f"Results keys: {list(results.keys())}")
     
@@ -236,7 +190,6 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     return {
         "model": model_name,
         "model_path": str(model_path),
-        "fixed_model_path": str(fixed_model_path) if do_fixed else None,
         "source": source_results,
         "target": target_results,
         "domain_accuracy": domain_accuracy,
@@ -343,9 +296,6 @@ def main():
         # 添加数据行
         for r in all_results:
             model_name = r["model"]
-            # 标记是否修复过
-            if r.get("fixed_model_path"):
-                model_name = f"{model_name}*"
             
             table.add_row(
                 model_name,
@@ -357,7 +307,6 @@ def main():
             )
         
         console.print(table)
-        print("\n* 表示该模型从损坏的 checkpoint 修复后验证")
     else:
         # 回退到普通文本输出
         # 表头（手动对齐，中文字符显示宽度为2）
@@ -366,20 +315,15 @@ def main():
         print("-" * 105)
         
         for r in all_results:
-            model_name = r["model"][:26]  # 截断长名称
+            model_name = r["model"][:30]  # 截断长名称
             src_map50 = r["source"]["mAP50"]
             src_map5095 = r["source"]["mAP50-95"]
             tgt_map50 = r["target"]["mAP50"]
             tgt_map5095 = r["target"]["mAP50-95"]
             domain_acc = r.get("domain_accuracy", 0)
             
-            # 标记是否修复过（显示在模型名称后面）
-            fixed_marker = "*" if r.get("fixed_model_path") else " "
-            row = f"{model_name:<27}{fixed_marker}{src_map50:>12.4f} {src_map5095:>14.4f} {tgt_map50:>14.4f} {tgt_map5095:>16.4f} {domain_acc:>12.4f}"
+            row = f"{model_name:<30}{src_map50:>12.4f} {src_map5095:>14.4f} {tgt_map50:>14.4f} {tgt_map5095:>16.4f} {domain_acc:>12.4f}"
             print(row)
-        
-        print("-" * 105)
-        print("* 表示该模型从损坏的 checkpoint 修复后验证")
     
     # 保存结果到 JSON
     output_file = "runs/validation_results.json"
