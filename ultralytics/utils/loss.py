@@ -34,11 +34,11 @@ class DomainLoss(nn.Module):
         >>> loss = domain_loss(source_preds, target_preds)
     """
 
-    def __init__(self, epsilon: float = 0.1):
+    def __init__(self, epsilon: float = 0):
         """Initialize DomainLoss with label smoothing parameter.
 
         Args:
-            epsilon: Label smoothing parameter. Default is 0.1.
+            epsilon: Label smoothing parameter.
         """
         super().__init__()
         self.epsilon = epsilon

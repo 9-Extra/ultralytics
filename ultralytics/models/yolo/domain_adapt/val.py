@@ -223,7 +223,7 @@ class DomainAdaptationValidator(BaseValidator):
             # 计算 domain_loss（需要同时有源域和目标域）
             if source_domain_preds is not None and target_domain_preds is not None:
                 # 使用 DomainLoss 计算 domain_loss（包含标签平滑）
-                domain_loss = DomainLoss(epsilon=0.1)(
+                domain_loss = DomainLoss()(
                     source_domain_preds,
                     target_domain_preds
                 ) * self.args.domain_loss_weight

@@ -310,12 +310,14 @@ class DetectGRL(Detect):
             return DetectGRL.GradientScalarFunction.apply(input, self.weight)
 
     
-    domain_classify_only: bool # 只进行域分类，训练时可以节省一些开销
+    mixed_batch_input: bool # 是否将原域和目标域混在一个batch输入，如果是则训练时只对前一半batch进行目标检测
     
     def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
         assert end2end, "只考虑端到端模式"
         assert reg_max == 1, "不使用DFL"
         super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        
+        self.mixed_batch_input = False
         
         # 域分类器：对每层应用3次卷积（3x3, 3x3, 1x1，输出16通道）
         c_dom = max(ch[0] // 4, 16)  # 中间层通道数
@@ -370,6 +372,10 @@ class DetectGRL(Detect):
         self, x: list[torch.Tensor]
     ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """拼接并返回预测的边界框、类别概率和域预测结果。"""
+        full_x = x
+        if self.mixed_batch_input and self.training:
+            x = [t.chunk(2, dim=0)[0] for t in x]
+        
         preds = self.forward_head(x, **self.one2many)
             
         if self.end2end:
@@ -378,7 +384,7 @@ class DetectGRL(Detect):
             preds = {"one2many": preds, "one2one": one2one}
             
         # 将域预测添加到preds字典中
-        preds["domain_pred"] = self.predict_domain(x)
+        preds["domain_pred"] = self.predict_domain(full_x)
         
         if self.training:
             return preds

@@ -217,10 +217,7 @@ class DomainAdaptationTrainer(BaseTrainer):
             (DataLoader): 源域数据加载器（训练时还会创建目标域数据加载器）。
         """
         assert mode in {"train", "val"}, f"Mode must be 'train' or 'val', not {mode}."
-        if self.args.domain_batchnorm_update and mode == "train":
-            assert batch_size % 2 == 0, "batch_size需要减半"
-            batch_size = batch_size // 2
-        
+
         with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
             dataset = self.build_dataset(
                 dataset_path,
@@ -253,11 +250,6 @@ class DomainAdaptationTrainer(BaseTrainer):
     
     def _prepare_domain_dataloader(self, dataset_path: str, batch_size: int = 16, rank: int = 0, mode: str = "train"):
         assert self.target_data, "目标域数据集不存在"
-        
-        if self.args.domain_batchnorm_update and mode == "train":
-            # 这里mode == "train"其实一定成立 
-            assert batch_size % 2 == 0, "batch_size需要减半"
-            batch_size = batch_size // 2
         
         with torch_distributed_zero_first(rank):
             target_dataset = self.build_dataset(
@@ -514,7 +506,7 @@ class DomainAdaptationTrainer(BaseTrainer):
             mode="train"
         )
         
-        head = unwrap_model(self.model).model[-1]
+        head: DetectGRL = unwrap_model(self.model).model[-1]
         backbone_neck = unwrap_model(self.model).model[
             :-1
         ]  # 除 head 外的所有层
@@ -608,28 +600,34 @@ class DomainAdaptationTrainer(BaseTrainer):
                     
                     # 前向传播
                     if self.args.domain_batchnorm_update:
-                        # 合并两个域的图像一并推理，然后再切分开
+                        # 合并两个域的图像一并推理，训练时检测头内只会检查前一半
+                        head.mixed_batch_input = True
                         all_images = torch.cat((batch["img"], batch["domain_img"]), dim=0)
-                        preds, target_preds = split_dict_into_two(self.model(all_images))
+                        preds = self.model(all_images)
+                        source_domain_preds, target_domain_preds = torch.chunk(preds["domain_pred"], 2, dim=0)
                     else:
+                        head.mixed_batch_input = False
                         # 原域正常推理
                         preds = self.model(batch["img"])
+                        source_domain_preds = preds["domain_pred"]
                         # 冻结所有 BatchNorm 的统计量更新，防止目标域数据影响 running statistics
                         orginal_stats = {}
                         for m in backbone_neck.modules():
                             if isinstance(m, nn.BatchNorm2d):
                                 orginal_stats[m] = m.track_running_stats
-                                m.track_running_stats = False
+                                # m.track_running_stats = False
                                 # m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
                         
                         # 目标域推理
                         target_preds = self.model(batch["domain_img"])
+                        target_domain_preds = target_preds["domain_pred"]
 
                         # 恢复
                         for m in backbone_neck.modules():
                             if isinstance(m, nn.BatchNorm2d):
-                                m.track_running_stats = orginal_stats[m]
+                                # m.track_running_stats = orginal_stats[m]
                                 # m.train()
+                                pass
                     pass
                 
                     # 计算loss
@@ -644,19 +642,17 @@ class DomainAdaptationTrainer(BaseTrainer):
 
                     original_yolo_loss = loss.sum()  # original_yolo_loss
 
-                    source_domain_preds = preds["domain_pred"]
-                    target_domain_preds = target_preds["domain_pred"]
-
                     # 使用 DomainLoss 计算 domain_loss（包含标签平滑）
-                    domain_loss = DomainLoss(epsilon=0.1)(
+                    domain_loss = DomainLoss()(
                         source_domain_preds,
                         target_domain_preds,
                     ) * self.args.domain_loss_weight
         
                     # 在domain_batchnorm_update=False时，目标域的分类logit可能为nan，因此需要修补
                     if domain_loss.isnan().any():
-                        breakpoint()
-                        target_domain_preds = unwrap_model(self.model)(batch["domain_img"])["domain_pred"]
+                        # breakpoint()
+                        # target_domain_preds = unwrap_model(self.model)(batch["domain_img"])["domain_pred"]
+                        pass
     
                     # 合并loss
                     self.loss = original_yolo_loss + domain_loss
