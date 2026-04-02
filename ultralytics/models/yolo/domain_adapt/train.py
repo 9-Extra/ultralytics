@@ -506,10 +506,9 @@ class DomainAdaptationTrainer(BaseTrainer):
             mode="train"
         )
         
-        head: DetectGRL = unwrap_model(self.model).model[-1]
-        backbone_neck = unwrap_model(self.model).model[
-            :-1
-        ]  # 除 head 外的所有层
+        bare_model: torch.nn.Module = unwrap_model(self.model).model
+        head: DetectGRL = bare_model[-1]
+        backbone_neck = bare_model[:-1]  # 除 head 外的所有层
 
         nb = len(self.train_loader)  # number of batches
         nw = (
@@ -610,7 +609,7 @@ class DomainAdaptationTrainer(BaseTrainer):
                         source_domain_preds = preds["domain_pred"]
                         # 冻结所有 BatchNorm 的统计量更新，防止目标域数据影响 running statistics
                         # orginal_stats = {}
-                        for m in backbone_neck.modules():
+                        for m in bare_model.modules():
                            if isinstance(m, nn.BatchNorm2d):
                                 # orginal_stats[m] = m.track_running_stats
                                 # m.track_running_stats = False
@@ -621,7 +620,7 @@ class DomainAdaptationTrainer(BaseTrainer):
                         target_domain_preds = target_preds["domain_pred"]
 
                         # 恢复
-                        for m in backbone_neck.modules():
+                        for m in bare_model.modules():
                             if isinstance(m, nn.BatchNorm2d):
                                 # m.track_running_stats = orginal_stats[m]
                                 m.train()
