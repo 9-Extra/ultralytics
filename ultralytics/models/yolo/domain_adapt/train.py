@@ -31,7 +31,7 @@ from ultralytics.utils.torch_utils import (
     unwrap_model,
 )
 
-def split_dict_into_two(data: dict | torch.Tensor, dim=0):
+def split_dict_into_two(data: dict | torch.Tensor, dim=0) -> tuple[dict, dict]:
     """
     将dict中所有tensor分割成两个（沿着指定维度）
     
@@ -601,33 +601,31 @@ class DomainAdaptationTrainer(BaseTrainer):
                     # 前向传播
                     if self.args.domain_batchnorm_update:
                         # 合并两个域的图像一并推理，训练时检测头内只会检查前一半
-                        head.mixed_batch_input = True
                         all_images = torch.cat((batch["img"], batch["domain_img"]), dim=0)
-                        preds = self.model(all_images)
-                        source_domain_preds, target_domain_preds = torch.chunk(preds["domain_pred"], 2, dim=0)
+                        preds, target_preds = split_dict_into_two(self.model(all_images))
+                        source_domain_preds, target_domain_preds = preds["domain_pred"], target_preds["domain_pred"]
                     else:
-                        head.mixed_batch_input = False
                         # 原域正常推理
                         preds = self.model(batch["img"])
                         source_domain_preds = preds["domain_pred"]
                         # 冻结所有 BatchNorm 的统计量更新，防止目标域数据影响 running statistics
-                        orginal_stats = {}
-                        for m in backbone_neck.modules():
-                            if isinstance(m, nn.BatchNorm2d):
-                                orginal_stats[m] = m.track_running_stats
+                        # orginal_stats = {}
+                        # for m in backbone_neck.modules():
+                        #    if isinstance(m, nn.BatchNorm2d):
+                                # orginal_stats[m] = m.track_running_stats
                                 # m.track_running_stats = False
                                 # m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
-                        
+                        #        pass
                         # 目标域推理
                         target_preds = self.model(batch["domain_img"])
                         target_domain_preds = target_preds["domain_pred"]
 
                         # 恢复
-                        for m in backbone_neck.modules():
-                            if isinstance(m, nn.BatchNorm2d):
+                        #for m in backbone_neck.modules():
+                        #    if isinstance(m, nn.BatchNorm2d):
                                 # m.track_running_stats = orginal_stats[m]
                                 # m.train()
-                                pass
+                        #        pass
                     pass
                 
                     # 计算loss
