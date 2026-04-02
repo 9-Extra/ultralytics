@@ -16,7 +16,7 @@ from ultralytics.utils.tal import dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import TORCH_1_11, fuse_conv_and_bn, smart_inference_mode
 
 from .block import DFL, SAVPE, BNContrastiveHead, ContrastiveHead, Proto, Proto26, RealNVP, Residual, SwiGLUFFN
-from .conv import Conv, DWConv
+from .conv import Conv, DWConv, autopad
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
@@ -251,6 +251,23 @@ class Detect(nn.Module):
         self.cv2 = self.cv3 = None
 
 
+class ConvGN(nn.Module):
+    """和一般的CONV一样除了使用GroupNorm"""
+
+    default_act = nn.SiLU()  # default activation
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        super().__init__()
+        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.gn = nn.GroupNorm(1, c2)
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(self.gn(self.conv(x)))
+
+    def forward_fuse(self, x):
+        return self.forward(x)
+    
 class DetectGRL(Detect):
     """带有梯度反转层(GRL)的YOLO检测头，用于域自适应。
 
@@ -321,9 +338,9 @@ class DetectGRL(Detect):
         self.domain_cls = nn.ModuleList(
             nn.Sequential(
                 DetectGRL.GradientScalarLayer(-0.1),  # 梯度反转层
-                Conv(x, c_dom, 3),           # 3x3卷积
-                Conv(c_dom, c_dom, 3),       # 3x3卷积
-                Conv(c_dom, 16, 1),          # 1x1卷积，输出16通道
+                ConvGN(x, c_dom, 3),           # 3x3卷积
+                ConvGN(c_dom, c_dom, 3),       # 3x3卷积
+                ConvGN(c_dom, 16, 1),          # 1x1卷积，输出16通道
             )
             for x in ch
         )
