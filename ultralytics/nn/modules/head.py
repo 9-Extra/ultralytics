@@ -334,12 +334,12 @@ class DetectGRL(Detect):
         self.mixed_batch_input = False
         
         # 域分类器：对每层应用3次卷积（3x3, 3x3, 1x1，输出16通道）
-        c_dom = max(ch[0] // 4, 16)  # 中间层通道数
+        c_dom = min(ch[0] // 4, 16)  # 中间层通道数，ch可能是[64, 128, 256]
         self.domain_cls = nn.ModuleList(
             nn.Sequential(
                 DetectGRL.GradientScalarLayer(-0.1),  # 梯度反转层
                 ConvGN(x, c_dom, 3),           # 3x3卷积
-                ConvGN(c_dom, c_dom, 3),       # 3x3卷积
+                # ConvGN(c_dom, c_dom, 3),       # 3x3卷积
                 ConvGN(c_dom, 16, 1),          # 1x1卷积，输出16通道
             )
             for x in ch

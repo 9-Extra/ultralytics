@@ -599,7 +599,7 @@ class DomainAdaptationTrainer(BaseTrainer):
                     
                     # 前向传播
                     if self.args.domain_batchnorm_update:
-                        # 合并两个域的图像一并推理，训练时检测头内只会检查前一半
+                        # 合并两个域的图像一并推理，再切分网络输出。即使反向传播时只使用源域的预测loss，网络中的BatchNorm层依然会学习统计两个域的特征统计量
                         all_images = torch.cat((batch["img"], batch["domain_img"]), dim=0)
                         preds, target_preds = split_dict_into_two(self.model(all_images))
                         source_domain_preds, target_domain_preds = preds["domain_pred"], target_preds["domain_pred"]
@@ -644,12 +644,6 @@ class DomainAdaptationTrainer(BaseTrainer):
                         source_domain_preds,
                         target_domain_preds,
                     ) * self.args.domain_loss_weight
-        
-                    # 在domain_batchnorm_update=False时，目标域的分类logit可能为nan，因此需要修补
-                    if domain_loss.isnan().any():
-                        # breakpoint()
-                        # target_domain_preds = unwrap_model(self.model)(batch["domain_img"])["domain_pred"]
-                        pass
     
                     # 合并loss
                     self.loss = original_yolo_loss + domain_loss

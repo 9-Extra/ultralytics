@@ -174,7 +174,12 @@ def main():
         save_period=args.save_period,
         amp=True,
         compile=args.complie,
-        cache="disk"
+        cache="disk",
+        
+        # 数据增强
+        scale=0.2,
+        mosaic=0.8,
+        mixup=0.1
     )
 
     print("\n" + "=" * 60)
