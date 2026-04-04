@@ -71,8 +71,9 @@ class DomainLoss(nn.Module):
         loss = F.binary_cross_entropy_with_logits(all_preds, all_labels, reduction="none")
 
         # 若输出维度为 3（DetectSeparateGRL），应用尺度递减权重
-        assert loss.ndim == 2 # [B, 1]或者[B, 3]
+        assert loss.ndim == 2  # [B, 1]或者[B, 3]
         if loss.shape[-1] == 3:
+            self.scale_weights = self.scale_weights.to(loss.device)
             loss = loss * self.scale_weights
 
         return loss.sum()
