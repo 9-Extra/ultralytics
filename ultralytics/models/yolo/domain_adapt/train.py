@@ -17,6 +17,7 @@ from torch import distributed as dist
 from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
+from ultralytics.models.yolo.domain_adapt.val import DomainAdaptationValidator
 from ultralytics.utils.loss import DomainLoss
 from ultralytics.nn.modules.head import DetectGRL
 from ultralytics.nn.tasks import DetectionModel
@@ -104,6 +105,8 @@ class DomainAdaptationTrainer(BaseTrainer):
         >>> trainer = DomainAdaptationTrainer(overrides=args)
         >>> trainer.train()
     """
+    
+    validator: DomainAdaptationValidator
 
     def __init__(
         self, cfg=DEFAULT_CFG, overrides: dict[str, Any] | None = None, _callbacks=None
@@ -560,6 +563,9 @@ class DomainAdaptationTrainer(BaseTrainer):
                 LOGGER.info(self.progress_string())
                 pbar = TQDM(enumerate(self.train_loader), total=nb)
             self.tloss = None
+            train_domain_right = 0 # 当前epoch域分类器预测正确的总数
+            train_domain_totol = 0 # 当前epoch域分类器预测数
+            
             for i, batch in pbar:
                 self.run_callbacks("on_train_batch_start")
                 # Warmup
@@ -651,7 +657,7 @@ class DomainAdaptationTrainer(BaseTrainer):
                         (self.loss_items, domain_loss.detach().unsqueeze_(dim=0))
                     )
                     
-                    # 计算域分类准确率
+                    # 计算域分类准确率并纳入统计
                     with torch.no_grad():
                         # Source domain: 预测 < 0.5 为正确 (label=0)
                         source_correct = (source_domain_preds < 0).sum().item()
@@ -660,16 +666,13 @@ class DomainAdaptationTrainer(BaseTrainer):
                         total_samples = (
                             source_domain_preds.numel() + target_domain_preds.numel()
                         )
-                        domain_correct = source_correct + target_correct
-                        domain_accuracy = (
-                            domain_correct / total_samples if total_samples > 0 else 0.0
-                        )
-
-                    # 保存域分类准确率用于后续 metrics
-                    self.domain_acc = domain_accuracy
+                        train_domain_totol += total_samples
+                        train_domain_right += source_correct + target_correct
 
                     if RANK != -1:
                         self.loss *= self.world_size
+                        
+                    # tloss是整个batch的平均loss
                     self.tloss = (
                         self.loss_items
                         if self.tloss is None
@@ -761,7 +764,8 @@ class DomainAdaptationTrainer(BaseTrainer):
                         **self.label_loss_items(self.tloss),
                         **self.metrics,
                         **self.lr,
-                        "domain_acc": getattr(self, "domain_acc", 0.0),
+                        "metrics/domain_acc": train_domain_right / train_domain_totol if train_domain_totol != 0 else 0,
+                        "target_metrics/domain_acc": self.validator.domain_stats["accuracy"],
                     }
                 )
                 self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
