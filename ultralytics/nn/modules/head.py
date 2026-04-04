@@ -20,7 +20,7 @@ from .conv import Conv, DWConv, autopad
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "DetectGRL", "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect"
+__all__ = "DetectGRL", "DetectSeparateGRL", "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect"
 
 
 class Detect(nn.Module):
@@ -331,8 +331,6 @@ class DetectGRL(Detect):
         assert reg_max == 1, "不使用DFL"
         super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
         
-        self.mixed_batch_input = False
-        
         # 域分类器：对每层应用3次卷积（3x3, 3x3, 1x1，输出16通道）
         c_dom = min(ch[0] // 4, 16)  # 中间层通道数，ch可能是[64, 128, 256]
         self.domain_cls = nn.ModuleList(
@@ -361,7 +359,7 @@ class DetectGRL(Detect):
             pass
         
     def predict_domain(self, x: list[torch.Tensor]) -> torch.Tensor | None:
-        """预测图像属于源域还是目标域，输出形状为[batch_size]的向量，规定源域为0，目标域为1"""
+        """预测图像属于源域还是目标域，输出形状为[batch_size, 1]的向量，规定源域为0，目标域为1"""
         if self.domain_cls is None or self.domain_fusion is None:
             return None # for fuse
         
@@ -378,8 +376,8 @@ class DetectGRL(Detect):
         # 1x1卷积融合： (bs, 1, 1, 1)
         domain_out = self.domain_fusion(domain_feat)
         
-        # 重塑为 (bs,) - batch_size大小的一维向量
-        domain_out = domain_out.view(-1)
+        # 重塑为 (bs, 1)
+        domain_out = domain_out.view(-1, 1)
         return domain_out
         
     def forward(
@@ -410,6 +408,99 @@ class DetectGRL(Detect):
         # 在直接验证时可以检查域分类器性能方便实验探索
         # self.domain_cls = None
         # self.domain_fusion = None
+
+
+class DetectSeparateGRL(Detect):
+    """直接继承Detect的域自适应检测头，对不同尺度特征分别构造域分类器。
+
+    与DetectGRL先融合多尺度特征再分类不同，该类为每个检测层独立构建
+    完整的域分类器，分别输出对应尺度的域分类logits（单通道，保持空间
+    分辨率不变），并将所有结果以相同格式放入list中返回。
+    """
+
+    class GradientScalarFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, input: torch.Tensor, weight: float) -> torch.Tensor:
+            ctx.weight = weight
+            return input.view_as(input)
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            grad_input = grad_output * ctx.weight
+            return grad_input, None
+
+    class GradientScalarLayer(torch.nn.Module):
+        def __init__(self, weight: float = -0.1):
+            super().__init__()
+            self.weight = weight
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            return DetectSeparateGRL.GradientScalarFunction.apply(input, self.weight)
+
+    def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
+        assert end2end, "只考虑端到端模式"
+        assert reg_max == 1, "不使用DFL"
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
+
+        # 为每层构建独立的域分类器：GRL -> ConvGN -> ConvGN -> Conv2d(16, 1, 1)
+        c_dom = min(ch[0] // 4, 16)
+        self.domain_cls = nn.ModuleList(
+            nn.Sequential(
+                DetectSeparateGRL.GradientScalarLayer(-0.1),
+                ConvGN(x, c_dom, 3),
+                ConvGN(c_dom, 16, 1),
+                nn.Conv2d(16, 1, 1),
+            )
+            for x in ch
+        )
+
+    @property
+    def grl_weight(self) -> float:
+        return self.domain_cls[0][0].weight
+
+    @grl_weight.setter
+    def grl_weight(self, value: float):
+        for seq in self.domain_cls:
+            seq[0].weight = value
+
+    def predict_domain(self, x: list[torch.Tensor]) -> torch.Tensor | None:
+        """预测各尺度的域分类结果，合并后返回形状为(bs, 3)的张量。"""
+        if self.domain_cls is None:
+            return None
+
+        domain_preds = []
+        for i in range(self.nl):
+            dom_feat = self.domain_cls[i](x[i])  # (bs, 1, h, w)
+            dom_feat = F.adaptive_avg_pool2d(dom_feat, 1)  # (bs, 1, 1, 1)
+            domain_preds.append(dom_feat.view(-1, 1))  # (bs, 1)
+
+        # 沿通道维度拼接为 (bs, 3)
+        return torch.cat(domain_preds, dim=1)
+
+    def forward(
+        self, x: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """拼接并返回预测的边界框、类别概率和域预测结果。"""
+        preds = self.forward_head(x, **self.one2many)
+
+        if self.end2end:
+            x_detach = [xi.detach() for xi in x]
+            one2one = self.forward_head(x_detach, **self.one2one)
+            preds = {"one2many": preds, "one2one": one2one}
+
+        preds["domain_pred"] = self.predict_domain(x)
+
+        if self.training:
+            return preds
+
+        y = self._inference(preds["one2one"] if self.end2end else preds)
+        if self.end2end:
+            y = self.postprocess(y.permute(0, 2, 1))
+        return y if self.export else (y, preds)
+
+    def fuse(self) -> None:
+        """移除域预测头"""
+        super().fuse()
 
 
 class Segment(Detect):

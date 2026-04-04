@@ -47,6 +47,7 @@ class DomainAdaptationValidator(BaseValidator):
         self.target_dataloader = target_dataloader
         self.target_metrics = DetMetrics() if target_dataloader is not None else None
         self.domain_stats = None  # Domain classification statistics
+        self.domain_loss_fn = DomainLoss()
     
     def _setup_model(self, trainer=None, model=None):
         """Setup model for validation.
@@ -223,7 +224,7 @@ class DomainAdaptationValidator(BaseValidator):
             # 计算 domain_loss（需要同时有源域和目标域）
             if source_domain_preds is not None and target_domain_preds is not None:
                 # 使用 DomainLoss 计算 domain_loss（包含标签平滑）
-                domain_loss = DomainLoss()(
+                domain_loss = self.domain_loss_fn(
                     source_domain_preds,
                     target_domain_preds
                 ) * self.args.domain_loss_weight

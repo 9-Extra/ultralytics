@@ -46,11 +46,12 @@ from ultralytics import YOLO
 from ultralytics.models.yolo import YOLODA
 
 # 方式1: 使用 YOLO 类自动识别（推荐）
-model = YOLO("yolo26n-da.yaml")  # 自动识别为 YOLODA，使用 n scale
-model = YOLO("yolo26s-da.yaml")  # 使用 s scale
-model = YOLO("yolo26m-da.yaml")  # 使用 m scale
-model = YOLO("yolo26l-da.yaml")  # 使用 l scale
-model = YOLO("yolo26x-da.yaml")  # 使用 x scale
+model = YOLO("yolo26n-da.yaml")    # 自动识别为 YOLODA，使用 DetectGRL 检测头
+model = YOLO("yolo26n-dasp.yaml")  # 自动识别为 YOLODA，使用 DetectSeparateGRL 检测头
+model = YOLO("yolo26s-da.yaml")
+model = YOLO("yolo26m-da.yaml")
+model = YOLO("yolo26l-da.yaml")
+model = YOLO("yolo26x-da.yaml")
 
 # 方式2: 直接使用 YOLODA 类
 model = YOLODA("yolo26n-da.yaml")
@@ -69,9 +70,10 @@ model.predict("image.jpg")
 
 YOLODA 使用 `-da` 后缀来标识域适应模型：
 
-- `yolo26n-da.yaml` → 自动查找 `yolo26-da.yaml` 并应用 n scale
-- `yolo26s-da.yaml` → 自动查找 `yolo26-da.yaml` 并应用 s scale
-- `yolo26-da.yaml` → 基础配置文件（默认使用 n scale）
+- `yolo26n-da.yaml`   → 自动查找 `yolo26-da.yaml`   并应用 n scale，使用 DetectGRL 检测头
+- `yolo26n-dasp.yaml` → 自动查找 `yolo26-dasp.yaml` 并应用 n scale，使用 DetectSeparateGRL 检测头
+- `yolo26s-da.yaml`   → 自动查找 `yolo26-da.yaml`   并应用 s scale
+- `yolo26-da.yaml`    → 基础配置文件（默认使用 n scale）
 
 ## DomainAdaptationTrainer 使用方式
 

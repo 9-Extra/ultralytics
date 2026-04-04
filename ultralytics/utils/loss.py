@@ -28,6 +28,7 @@ class DomainLoss(nn.Module):
     Attributes:
         epsilon (float): Label smoothing parameter. Source domain is labeled as epsilon,
             target domain is labeled as 1 - epsilon.
+        scale_weights (torch.Tensor): 各尺度域分类器损失权重，DetectSeparateGRL 专用。
 
     Examples:
         >>> domain_loss = DomainLoss(epsilon=0.1)
@@ -42,6 +43,7 @@ class DomainLoss(nn.Module):
         """
         super().__init__()
         self.epsilon = epsilon
+        self.register_buffer("scale_weights", torch.tensor([1.0, 0.1, 0.01]))
 
     def forward(
         self,
@@ -51,8 +53,8 @@ class DomainLoss(nn.Module):
         """Compute domain classification loss with label smoothing.
 
         Args:
-            source_domain_preds: Domain predictions for source domain samples, shape (batch_size,).
-            target_domain_preds: Domain predictions for target domain samples, shape (batch_size,).
+            source_domain_preds: Domain predictions for source domain samples, shape (batch_size, C).
+            target_domain_preds: Domain predictions for target domain samples, shape (batch_size, C).
 
         Returns:
             torch.Tensor: The computed domain classification loss.
@@ -65,8 +67,15 @@ class DomainLoss(nn.Module):
         all_preds = torch.cat((source_domain_preds, target_domain_preds), dim=0)
         all_labels = torch.cat((source_labels, target_labels), dim=0)
 
-        # Compute BCE loss with label smoothing
-        return F.binary_cross_entropy_with_logits(all_preds, all_labels, reduction="sum")
+        # Compute BCE loss per element (reduction='none')
+        loss = F.binary_cross_entropy_with_logits(all_preds, all_labels, reduction="none")
+
+        # 若输出维度为 3（DetectSeparateGRL），应用尺度递减权重
+        assert loss.ndim == 2 # [B, 1]或者[B, 3]
+        if loss.shape[-1] == 3:
+            loss = loss * self.scale_weights
+
+        return loss.sum()
 
 
 class VarifocalLoss(nn.Module):

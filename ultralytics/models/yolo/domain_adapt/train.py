@@ -19,7 +19,7 @@ from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.models.yolo.domain_adapt.val import DomainAdaptationValidator
 from ultralytics.utils.loss import DomainLoss
-from ultralytics.nn.modules.head import DetectGRL
+from ultralytics.nn.modules.head import DetectGRL, DetectSeparateGRL
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils.tqdm import TQDM
 from ultralytics.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, RANK, colorstr
@@ -119,6 +119,7 @@ class DomainAdaptationTrainer(BaseTrainer):
             _callbacks (list, optional): 回调函数列表。
         """
         super().__init__(cfg, overrides, _callbacks)
+        self.domain_loss_fn = DomainLoss()
 
     def build_dataset(
         self,
@@ -364,11 +365,11 @@ class DomainAdaptationTrainer(BaseTrainer):
         # 设置 DetectGRL 的 grl_weight
         grl_weight = getattr(self.args, "grl_weight", -0.1)
         head = self.model.model[-1]
-        if isinstance(head, DetectGRL):
+        if isinstance(head, (DetectGRL, DetectSeparateGRL)):
             head.grl_weight = grl_weight
-            LOGGER.info(f"已设置 DetectGRL 模块的 grl_weight = {grl_weight}")
+            LOGGER.info(f"已设置域适应检测头的 grl_weight = {grl_weight}")
         else:
-            LOGGER.info(f"DetectGRL 模块未找到")
+            LOGGER.info(f"域适应检测头未找到")
 
     def get_model(
         self, cfg: str | None = None, weights: str | None = None, verbose: bool = True
@@ -510,7 +511,7 @@ class DomainAdaptationTrainer(BaseTrainer):
         )
         
         bare_model: torch.nn.Module = unwrap_model(self.model).model
-        head: DetectGRL = bare_model[-1]
+        head = bare_model[-1]
         backbone_neck = bare_model[:-1]  # 除 head 外的所有层
 
         nb = len(self.train_loader)  # number of batches
@@ -646,7 +647,7 @@ class DomainAdaptationTrainer(BaseTrainer):
                     original_yolo_loss = loss.sum()  # original_yolo_loss
 
                     # 使用 DomainLoss 计算 domain_loss（包含标签平滑）
-                    domain_loss = DomainLoss()(
+                    domain_loss = self.domain_loss_fn(
                         source_domain_preds,
                         target_domain_preds,
                     ) * self.args.domain_loss_weight
