@@ -605,7 +605,7 @@ class DomainAdaptationTrainer(BaseTrainer):
                     batch = self.preprocess_batch(batch)
                     
                     # 前向传播
-                    if self.args.domain_batchnorm_update:
+                    if False:
                         # 合并两个域的图像一并推理，再切分网络输出。即使反向传播时只使用源域的预测loss，网络中的BatchNorm层依然会学习统计两个域的特征统计量
                         all_images = torch.cat((batch["img"], batch["domain_img"]), dim=0)
                         preds, target_preds = split_dict_into_two(self.model(all_images))
@@ -615,23 +615,20 @@ class DomainAdaptationTrainer(BaseTrainer):
                         preds = self.model(batch["img"])
                         source_domain_preds = preds["domain_pred"]
                         # 冻结所有 BatchNorm 的统计量更新，防止目标域数据影响 running statistics
-                        # orginal_stats = {}
-                        for m in bare_model.modules():
-                           if isinstance(m, nn.BatchNorm2d):
-                                # orginal_stats[m] = m.track_running_stats
-                                # m.track_running_stats = False
-                                m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
-                        #        pass
+                        if self.args.bn_freeze:
+                            for m in bare_model.modules():
+                                if isinstance(m, nn.BatchNorm2d): 
+                                    m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
+                                pass
                         # 目标域推理
                         target_preds = self.model(batch["domain_img"])
                         target_domain_preds = target_preds["domain_pred"]
 
-                        # 恢复
-                        for m in bare_model.modules():
-                            if isinstance(m, nn.BatchNorm2d):
-                                # m.track_running_stats = orginal_stats[m]
-                                m.train()
-                            # pass
+                        if self.args.bn_freeze:
+                            for m in bare_model.modules():
+                                if isinstance(m, nn.BatchNorm2d): 
+                                    m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
+                                pass
                     pass
                 
                     # 计算loss

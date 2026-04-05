@@ -15,7 +15,7 @@ from ultralytics.utils import NOT_MACOS14
 from ultralytics.utils.tal import dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import TORCH_1_11, fuse_conv_and_bn, smart_inference_mode
 
-from .block import DFL, SAVPE, BNContrastiveHead, ContrastiveHead, Proto, Proto26, RealNVP, Residual, SwiGLUFFN
+from .block import DFL, SAVPE, BNContrastiveHead, ContrastiveHead, GradientScalarLayer, Proto, Proto26, RealNVP, Residual, SwiGLUFFN
 from .conv import Conv, DWConv, autopad
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
@@ -306,26 +306,6 @@ class DetectGRL(Detect):
         postprocess: 后处理模型预测结果。
     """
     
-    class GradientScalarFunction(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, input: torch.Tensor, weight: float) -> torch.Tensor:
-            ctx.weight = weight
-            return input.view_as(input)
-
-        @staticmethod
-        def backward(ctx, grad_output):
-            grad_input = grad_output * ctx.weight
-            return grad_input, None
-    
-    # 梯度反转层
-    class GradientScalarLayer(torch.nn.Module):
-        def __init__(self, weight: float = -0.1):
-            super().__init__()
-            self.weight = weight
-
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return DetectGRL.GradientScalarFunction.apply(input, self.weight)
-
     def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
         assert end2end, "只考虑端到端模式"
         assert reg_max == 1, "不使用DFL"
@@ -333,15 +313,29 @@ class DetectGRL(Detect):
         
         # 域分类器：对每层应用3次卷积（3x3, 3x3, 1x1，输出16通道）
         c_dom = min(ch[0] // 4, 16)  # 中间层通道数，ch可能是[64, 128, 256]
-        self.domain_cls = nn.ModuleList(
-            nn.Sequential(
-                DetectGRL.GradientScalarLayer(-0.1),  # 梯度反转层
-                ConvGN(x, c_dom, 3),           # 3x3卷积
-                # ConvGN(c_dom, c_dom, 3),       # 3x3卷积
-                ConvGN(c_dom, 16, 1),          # 1x1卷积，输出16通道
+        if True:
+            # 简化头
+            self.domain_cls = nn.ModuleList(
+                nn.Sequential(
+                    GradientScalarLayer(-0.1),  # 梯度反转层
+                    nn.AdaptiveAvgPool2d(1),
+                    nn.Conv2d(x, 16, 1, 1),
+                    nn.ReLU(inplace=True),
+                )
+                for x in ch
             )
-            for x in ch
-        )
+        else:
+            self.domain_cls = nn.ModuleList(
+                nn.Sequential(
+                    GradientScalarLayer(-0.1),
+                    ConvGN(x, c_dom, 3),
+                    ConvGN(c_dom, c_dom, 1, act=False),
+                    nn.AdaptiveAvgPool2d(1),
+                    ConvGN(c_dom, c_dom, 1),
+                    ConvGN(c_dom, 16, 1),
+                )
+                for x in ch
+            )
         
         # 融合层：1x1卷积，用于融合所有层的特征
         # 输入通道总数 = 16 * 层数，输出 = 1（二分类）
@@ -355,6 +349,7 @@ class DetectGRL(Detect):
     @grl_weight.setter
     def grl_weight(self, value: float):
         for seq in self.domain_cls:
+            assert isinstance(seq[0], GradientScalarLayer)
             seq[0].weight = value
             pass
         
@@ -366,8 +361,6 @@ class DetectGRL(Detect):
         domain_preds = []
         for i in range(self.nl):
             dom_feat = self.domain_cls[i](x[i])  # (bs, 16, h, w)
-            # 全局平均池化，得到 (bs, 16, 1, 1)
-            dom_feat = F.adaptive_avg_pool2d(dom_feat, 1)
             domain_preds.append(dom_feat)
         
         # 拼接所有层： (bs, 16 * nl, 1, 1)
@@ -418,25 +411,6 @@ class DetectSeparateGRL(Detect):
     分辨率不变），并将所有结果以相同格式放入list中返回。
     """
 
-    class GradientScalarFunction(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, input: torch.Tensor, weight: float) -> torch.Tensor:
-            ctx.weight = weight
-            return input.view_as(input)
-
-        @staticmethod
-        def backward(ctx, grad_output):
-            grad_input = grad_output * ctx.weight
-            return grad_input, None
-
-    class GradientScalarLayer(torch.nn.Module):
-        def __init__(self, weight: float = -0.1):
-            super().__init__()
-            self.weight = weight
-
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return DetectSeparateGRL.GradientScalarFunction.apply(input, self.weight)
-
     def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
         assert end2end, "只考虑端到端模式"
         assert reg_max == 1, "不使用DFL"
@@ -444,15 +418,37 @@ class DetectSeparateGRL(Detect):
 
         # 为每层构建独立的域分类器：GRL -> ConvGN -> ConvGN -> Conv2d(16, 1, 1)
         c_dom = min(ch[0] // 4, 16)
-        self.domain_cls = nn.ModuleList(
-            nn.Sequential(
-                DetectSeparateGRL.GradientScalarLayer(-0.1),
-                ConvGN(x, c_dom, 3),
-                ConvGN(c_dom, 16, 1),
-                nn.Conv2d(16, 1, 1),
+        if True:
+            # 简化的头
+            self.domain_cls = nn.ModuleList(
+                nn.Sequential(
+                    GradientScalarLayer(-0.1),
+                    nn.AdaptiveAvgPool2d(1),
+
+                    nn.Conv2d(x, c_dom, 1, 1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(c_dom, 16, 1, 1),
+                    nn.ReLU(inplace=True),
+                    
+                    nn.Conv2d(16, 1, 1),
+                )
+                for x in ch
             )
-            for x in ch
-        )
+        else:
+            # 复杂头
+            self.domain_cls = nn.ModuleList(
+                nn.Sequential(
+                    GradientScalarLayer(-0.1),
+                    ConvGN(x, c_dom, 3),
+                    ConvGN(c_dom, c_dom, 1, act=False),
+                    nn.AdaptiveAvgPool2d(1),
+                    ConvGN(c_dom, c_dom, 1),
+                    ConvGN(c_dom, 16, 1),
+
+                    nn.Conv2d(16, 1, 1),
+                )
+                for x in ch
+            )
 
     @property
     def grl_weight(self) -> float:
@@ -461,6 +457,7 @@ class DetectSeparateGRL(Detect):
     @grl_weight.setter
     def grl_weight(self, value: float):
         for seq in self.domain_cls:
+            assert isinstance(seq[0], GradientScalarLayer)
             seq[0].weight = value
 
     def predict_domain(self, x: list[torch.Tensor]) -> torch.Tensor | None:
@@ -470,8 +467,7 @@ class DetectSeparateGRL(Detect):
 
         domain_preds = []
         for i in range(self.nl):
-            dom_feat = self.domain_cls[i](x[i])  # (bs, 1, h, w)
-            dom_feat = F.adaptive_avg_pool2d(dom_feat, 1)  # (bs, 1, 1, 1)
+            dom_feat = self.domain_cls[i](x[i])  # (bs, 1, 1, 1)
             domain_preds.append(dom_feat.view(-1, 1))  # (bs, 1)
 
         # 沿通道维度拼接为 (bs, 3)

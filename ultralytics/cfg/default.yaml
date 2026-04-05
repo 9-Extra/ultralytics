@@ -128,7 +128,7 @@ auto_augment: randaugment # (str) classification auto augmentation policy: randa
 erasing: 0.4 # (float) random erasing probability for classification (0.0–1.0)
 domain_loss_weight: 0.2 # (float) 域分类器损失权重
 grl_weight: -0.1 # (float) 梯度反转层系数
-domain_batchnorm_update: false # (bool) 是否使用目标域数据更新BatchNorm参数
+bn_freeze: false # (bool) 是否在目标域前向传播时冻结BatchNorm参数
 
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg: # (str, optional) path to a config.yaml that overrides defaults

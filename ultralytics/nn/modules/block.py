@@ -52,6 +52,7 @@ __all__ = (
     "ResNetLayer",
     "SCDown",
     "TorchVision",
+    "GradientScalarLayer"
 )
 
 
@@ -2065,3 +2066,25 @@ class RealNVP(nn.Module):
             self.float()
         z, log_det = self.backward_p(x)
         return self.prior.log_prob(z) + log_det
+    
+    
+class GradientScalarFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input: torch.Tensor, weight: float) -> torch.Tensor:
+        ctx.weight = weight
+        return input.view_as(input)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_input = grad_output * ctx.weight
+        return grad_input, None
+
+# 梯度反转层
+class GradientScalarLayer(torch.nn.Module):
+    def __init__(self, weight: float = -0.1):
+        super().__init__()
+        self.weight = weight
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return GradientScalarFunction.apply(input, self.weight)
+

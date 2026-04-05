@@ -67,9 +67,9 @@ def parse_args():
         help="梯度反转层系数 (默认: -0.1)",
     )
     parser.add_argument(
-        "--domain-batchnorm-update",
+        "--bn_freeze",
         action="store_true",
-        help="使用目标域数据更新BatchNorm参数 (默认: False)",
+        help="是否在目标域前向传播时冻结BatchNorm参数 (默认: False)",
     )
 
     # 其他配置
@@ -140,7 +140,7 @@ def main():
     print(f"图像尺寸: {args.imgsz}")
     print(f"域适应损失权重: {args.domain_loss_weight}")
     print(f"梯度反转层系数: {args.grl_weight}")
-    print(f"目标域BN更新: {args.domain_batchnorm_update}")
+    print(f"目标域冻结BN更新: {args.bn_freeze}")
     print(f"设备: {args.device}")
     print("=" * 60)
 
@@ -165,7 +165,7 @@ def main():
         deterministic=False,
         domain_loss_weight=args.domain_loss_weight,
         grl_weight=args.grl_weight,
-        domain_batchnorm_update=args.domain_batchnorm_update,
+        bn_freeze=args.bn_freeze,
         device=args.device,
         workers=args.workers,
         project=args.project,

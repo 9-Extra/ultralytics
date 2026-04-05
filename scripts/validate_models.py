@@ -1,17 +1,20 @@
 """
-验证 runs/detect 中所有模型在源域和目标域上的性能 (v2 - 修复版)
+验证 runs/detect 中所有模型在源域和目标域上的性能 (v3 - 支持增量验证)
+
+新增功能：
+- 支持 --force-all 参数强制重新验证所有模型
+- 支持从 runs/validation_results.json 读取缓存结果，跳过已验证的模型
+- 最终表格始终包含所有模型的结果（缓存 + 新验证）
 
 修复了以下问题：
 1. 模型路径解析问题
 2. 添加更多错误检查和日志
 3. 确保使用正确的设备
-4. 添加权重完整性检查
 """
 
-import os
 import sys
 import json
-import shutil
+import argparse
 from pathlib import Path
 import torch
 
@@ -183,10 +186,6 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     # 获取域分类准确率
     domain_accuracy = validator.domain_stats.get("accuracy", 0) if validator.domain_stats else 0
     
-    # 检查结果是否合理
-    if source_results["mAP50"] < 0.55:  # 随机模型约为 0.50
-        LOGGER.warning(f"源域 mAP50 ({source_results['mAP50']:.4f}) 过低，可能使用了随机权重！")
-    
     return {
         "model": model_name,
         "model_path": str(model_path),
@@ -196,12 +195,56 @@ def validate_model(model_path, source_dataloader, target_dataloader, batch_size=
     }
 
 
+def load_cached_results(cache_file):
+    """从缓存文件加载之前的验证结果"""
+    if not cache_file.exists():
+        return {}
+    try:
+        with open(cache_file, "r") as f:
+            results = json.load(f)
+        # 转换为以模型名称为键的字典，方便查找
+        return {r["model"]: r for r in results}
+    except (json.JSONDecodeError, KeyError) as e:
+        LOGGER.warning(f"读取缓存文件失败: {e}")
+        return {}
+
+
+def save_results(results, cache_file):
+    """保存验证结果到缓存文件"""
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_file, "w") as f:
+        json.dump(results, f, indent=2)
+
+
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(
+        description="验证 runs/detect 中所有模型在源域和目标域上的性能",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python validate_models.py              # 增量验证（使用缓存）
+  python validate_models.py --force-all  # 强制重新验证所有模型
+        """
+    )
+    parser.add_argument(
+        "--force-all",
+        action="store_true",
+        help="强制验证所有模型，忽略之前的缓存结果"
+    )
+    return parser.parse_args()
+
+
 def main():
     """主函数：验证所有模型"""
     
+    # 解析命令行参数
+    args_cmd = parse_args()
+    force_all = args_cmd.force_all
+    
     # 打印环境信息
     print(f"\n{'='*80}")
-    print("验证脚本 v2 - 环境信息")
+    print("验证脚本 v3 - 环境信息")
     print(f"{'='*80}")
     print(f"Python: {sys.version}")
     print(f"PyTorch: {torch.__version__}")
@@ -221,6 +264,7 @@ def main():
     batch_size = 16
     imgsz = 960
     device = ""  # 自动选择，优先GPU
+    cache_file = Path("runs/validation_results.json")
     
     # 检查 runs/detect 目录
     if not runs_dir.exists():
@@ -234,7 +278,23 @@ def main():
         LOGGER.warning(f"在 {runs_dir} 中没有找到模型")
         return
     
-    print(f"发现 {len(model_dirs)} 个模型需要验证")
+    # 加载缓存结果（如果不强制重新验证）
+    cached_results = {} if force_all else load_cached_results(cache_file)
+    if cached_results and not force_all:
+        print(f"从缓存加载了 {len(cached_results)} 个模型的验证结果")
+    
+    # 确定需要验证的模型
+    models_to_validate = []
+    for model_dir in model_dirs:
+        best_pt = model_dir / "weights" / "best.pt"
+        if not best_pt.exists():
+            LOGGER.warning(f"跳过 {model_dir.name}: 未找到 best.pt")
+            continue
+        
+        if force_all or model_dir.name not in cached_results:
+            models_to_validate.append(model_dir)
+    
+    print(f"发现 {len(model_dirs)} 个模型，其中 {len(models_to_validate)} 个需要验证")
     
     # 准备参数用于数据加载器（使用基础配置）
     args = create_base_args(batch_size, imgsz, device, plots=False, verbose=False, half=False)
@@ -248,83 +308,78 @@ def main():
     target_dataloader = get_dataloader(target_data_dict.get(args.split), args, target_data_dict, batch_size)
     print("数据集加载完成！\n")
     
-    # 存储所有结果
-    all_results = []
+    # 存储新验证的结果
+    new_results = []
     
-    # 验证每个模型
+    # 验证需要验证的模型
+    if models_to_validate:
+        for model_dir in sorted(models_to_validate):
+            best_pt = model_dir / "weights" / "best.pt"
+            
+            try:
+                result = validate_model(
+                    model_path=str(best_pt),
+                    source_dataloader=source_dataloader,
+                    target_dataloader=target_dataloader,
+                    batch_size=batch_size,
+                    imgsz=imgsz,
+                    device=device,
+                )
+                if result is not None:
+                    new_results.append(result)
+                    # 更新缓存
+                    cached_results[result["model"]] = result
+            except Exception as e:
+                LOGGER.error(f"验证 {model_dir.name} 时出错: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        print(f"\n新验证了 {len(new_results)} 个模型")
+    else:
+        print("\n所有模型都已在缓存中，无需重新验证")
+    
+    # 合并结果：所有模型目录对应的结果（缓存+新验证）
+    all_results = []
     for model_dir in sorted(model_dirs):
         best_pt = model_dir / "weights" / "best.pt"
-        
         if not best_pt.exists():
-            LOGGER.warning(f"跳过 {model_dir.name}: 未找到 best.pt")
             continue
-        
-        try:
-            result = validate_model(
-                model_path=str(best_pt),
-                source_dataloader=source_dataloader,
-                target_dataloader=target_dataloader,
-                batch_size=batch_size,
-                imgsz=imgsz,
-                device=device,
-            )
-            if result is not None:
-                all_results.append(result)
-        except Exception as e:
-            LOGGER.error(f"验证 {model_dir.name} 时出错: {e}")
-            import traceback
-            traceback.print_exc()
+        if model_dir.name in cached_results:
+            all_results.append(cached_results[model_dir.name])
     
     # 打印汇总结果
     print(f"\n{'='*105}")
     print("验证结果汇总")
     print(f"{'='*105}\n")
     
-    if RICH_AVAILABLE:
-        # 使用rich表格输出
-        console = Console(width=140)  # 设置足够宽的宽度
-        table = Table(title="验证结果汇总", box=box.ROUNDED)
-        
-        # 添加列
-        table.add_column("模型", style="cyan", no_wrap=True, min_width=28)
-        table.add_column("源域 mAP50", justify="right", style="green", min_width=12)
-        table.add_column("源域 mAP50-95", justify="right", style="green", min_width=14)
-        table.add_column("目标域 mAP50", justify="right", style="blue", min_width=14)
-        table.add_column("目标域 mAP50-95", justify="right", style="blue", min_width=16)
-        table.add_column("域分类准确率", justify="right", style="magenta", min_width=14)
-        
-        # 添加数据行
-        for r in all_results:
-            model_name = r["model"]
-            
-            table.add_row(
-                model_name,
-                f"{r['source']['mAP50']:.4f}",
-                f"{r['source']['mAP50-95']:.4f}",
-                f"{r['target']['mAP50']:.4f}",
-                f"{r['target']['mAP50-95']:.4f}",
-                f"{r.get('domain_accuracy', 0):.4f}",
-            )
-        
-        console.print(table)
-    else:
-        # 回退到普通文本输出
-        # 表头（手动对齐，中文字符显示宽度为2）
-        header = f"模型                          {'源域 mAP50':>12} {'源域 mAP50-95':>14} {'目标域 mAP50':>14} {'目标域 mAP50-95':>16} {'域分类准确率':>12}"
-        print(header)
-        print("-" * 105)
-        
-        for r in all_results:
-            model_name = r["model"][:30]  # 截断长名称
-            src_map50 = r["source"]["mAP50"]
-            src_map5095 = r["source"]["mAP50-95"]
-            tgt_map50 = r["target"]["mAP50"]
-            tgt_map5095 = r["target"]["mAP50-95"]
-            domain_acc = r.get("domain_accuracy", 0)
-            
-            row = f"{model_name:<30}{src_map50:>12.4f} {src_map5095:>14.4f} {tgt_map50:>14.4f} {tgt_map5095:>16.4f} {domain_acc:>12.4f}"
-            print(row)
+
+    # 使用rich表格输出
+    console = Console(width=140)  # 设置足够宽的宽度
+    table = Table(title="验证结果汇总", box=box.ROUNDED)
     
+    # 添加列
+    table.add_column("模型", style="cyan", no_wrap=True, min_width=28)
+    table.add_column("源域 mAP50", justify="right", style="green", min_width=12)
+    table.add_column("源域 mAP50-95", justify="right", style="green", min_width=14)
+    table.add_column("目标域 mAP50", justify="right", style="blue", min_width=14)
+    table.add_column("目标域 mAP50-95", justify="right", style="blue", min_width=16)
+    table.add_column("域分类准确率", justify="right", style="magenta", min_width=14)
+    
+    # 添加数据行
+    for r in all_results:
+        model_name = r["model"]
+        
+        table.add_row(
+            model_name,
+            f"{r['source']['mAP50']:.4f}",
+            f"{r['source']['mAP50-95']:.4f}",
+            f"{r['target']['mAP50']:.4f}",
+            f"{r['target']['mAP50-95']:.4f}",
+            f"{r.get('domain_accuracy', 0):.4f}",
+        )
+    
+    console.print(table)
+
     # 保存结果到 JSON
     output_file = "runs/validation_results.json"
     with open(output_file, "w") as f:
