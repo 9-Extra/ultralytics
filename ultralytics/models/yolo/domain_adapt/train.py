@@ -618,7 +618,7 @@ class DomainAdaptationTrainer(BaseTrainer):
                         if self.args.bn_freeze:
                             for m in bare_model.modules():
                                 if isinstance(m, nn.BatchNorm2d): 
-                                    m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
+                                    m.track_running_stats = False  # 禁用 running statistics 更新
                                 pass
                         # 目标域推理
                         target_preds = self.model(batch["domain_img"])
@@ -627,7 +627,7 @@ class DomainAdaptationTrainer(BaseTrainer):
                         if self.args.bn_freeze:
                             for m in bare_model.modules():
                                 if isinstance(m, nn.BatchNorm2d): 
-                                    m.eval()  # 切换到 eval 模式，禁用 running statistics 更新
+                                    m.track_running_stats = True
                                 pass
                     pass
                 
