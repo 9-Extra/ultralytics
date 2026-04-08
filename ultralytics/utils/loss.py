@@ -19,45 +19,103 @@ from .tal import bbox2dist, rbox2dist
 
 
 class DomainLoss(nn.Module):
-    """Domain classification loss with label smoothing for domain adaptation.
+    """Domain classification loss with label smoothing and progressive weight scheduling for domain adaptation.
 
     Implements the domain classification loss used in domain adaptation tasks to distinguish
     between source and target domain features. Uses binary cross-entropy with label smoothing
-    to prevent overconfidence.
+    to prevent overconfidence. Supports progressive weight decay to align with E2ELoss training dynamics.
 
     Attributes:
         epsilon (float): Label smoothing parameter. Source domain is labeled as epsilon,
             target domain is labeled as 1 - epsilon.
         scale_weights (torch.Tensor): 各尺度域分类器损失权重，DetectSeparateGRL 专用。
+        weight (float): Current domain loss weight (dynamically adjusted during training).
+        init_weight (float): Initial domain loss weight.
+        final_weight (float): Final domain loss weight after decay.
+        schedule (str): Weight decay schedule ('linear', 'cosine', or 'fixed').
+        epochs (int): Total number of training epochs for scheduling.
+        updates (int): Current update step (epoch).
 
     Examples:
-        >>> domain_loss = DomainLoss(epsilon=0.1)
+        >>> domain_loss = DomainLoss(epsilon=0.1, weight=0.2, final_weight=0.05, schedule='linear', epochs=100)
         >>> loss = domain_loss(source_preds, target_preds)
+        >>> domain_loss.update()  # Call at the end of each epoch
     """
 
-    def __init__(self, epsilon: float = 0):
-        """Initialize DomainLoss with label smoothing parameter.
+    def __init__(
+        self,
+        epsilon: float = 0,
+        weight: float = 0.2,
+        final_weight: float | None = None,
+        schedule: str = "fixed",
+        epochs: int = 100,
+    ):
+        """Initialize DomainLoss with label smoothing and progressive weight scheduling.
 
         Args:
             epsilon: Label smoothing parameter.
+            weight: Initial domain loss weight. Default is 0.2.
+            final_weight: Final domain loss weight after decay. If None, defaults to weight (no decay).
+            schedule: Weight decay schedule ('linear', 'cosine', or 'fixed'). Default is 'fixed'.
+            epochs: Total number of training epochs for scheduling. Default is 100.
         """
         super().__init__()
         self.epsilon = epsilon
         self.register_buffer("scale_weights", torch.tensor([1.0, 0.5, 0.25]))
+
+        # Progressive weight scheduling parameters
+        self.init_weight = weight
+        self.final_weight = final_weight if final_weight is not None else weight
+        self.schedule = schedule.lower()
+        self.epochs = max(epochs - 1, 1)  # Avoid division by zero
+        self.updates = 0
+        self.weight = weight  # Python float, no device issue
+
+        # Validate schedule type
+        if self.schedule not in ("linear", "cosine", "fixed"):
+            raise ValueError(f"Invalid schedule '{schedule}'. Choose from 'linear', 'cosine', or 'fixed'.")
+
+    def update(self) -> None:
+        """Update the domain loss weight based on the decay schedule.
+
+        This method should be called at the end of each training epoch, similar to E2ELoss.update().
+        The weight will decay from init_weight to final_weight following the specified schedule.
+        """
+        if self.schedule == "fixed" or self.init_weight == self.final_weight:
+            return
+
+        self.updates += 1
+        progress = min(self.updates / self.epochs, 1.0)
+
+        if self.schedule == "linear":
+            # Linear interpolation: w = w_init - (w_init - w_final) * progress
+            self.weight = self.init_weight - (self.init_weight - self.final_weight) * progress
+        elif self.schedule == "cosine":
+            # Cosine annealing: w = w_final + (w_init - w_final) * 0.5 * (1 + cos(pi * progress))
+            cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+            self.weight = self.final_weight + (self.init_weight - self.final_weight) * cosine_decay
+
+    def get_weight(self) -> float:
+        """Get the current domain loss weight.
+
+        Returns:
+            float: The current weight value.
+        """
+        return self.weight
 
     def forward(
         self,
         source_domain_preds: torch.Tensor,
         target_domain_preds: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute domain classification loss with label smoothing.
+        """Compute domain classification loss with label smoothing and progressive weighting.
 
         Args:
             source_domain_preds: Domain predictions for source domain samples, shape (batch_size, C).
             target_domain_preds: Domain predictions for target domain samples, shape (batch_size, C).
 
         Returns:
-            torch.Tensor: The computed domain classification loss.
+            torch.Tensor: The computed domain classification loss (weighted by current weight).
         """
         # Apply label smoothing: source = epsilon, target = 1 - epsilon
         source_labels = torch.full_like(source_domain_preds, self.epsilon)
@@ -76,7 +134,8 @@ class DomainLoss(nn.Module):
             self.scale_weights = self.scale_weights.to(loss.device)
             loss = loss * self.scale_weights
 
-        return loss.sum()
+        # Apply progressive weight
+        return loss.sum() * self.weight
 
 
 class VarifocalLoss(nn.Module):

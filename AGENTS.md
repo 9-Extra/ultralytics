@@ -132,7 +132,20 @@ YOLODA 模型支持以下域适应专用超参数：
 
 | 超参数 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `domain_loss_weight` | float | 0.2 | 域适应损失权重，控制域分类损失在总损失中的比重 |
+| `domain_loss_weight` | float | 0.2 | 域适应损失初始权重，控制域分类损失在总损失中的比重 |
+| `domain_loss_final_weight` | float | 0.05 | 域适应损失最终权重，用于动态权重调度 |
+| `domain_loss_schedule` | str | 'fixed' | 权重调度策略：'fixed'（固定）、'linear'（线性衰减）、'cosine'（余弦衰减） |
+
+#### 动态权重调度原理
+
+配合 YOLOv26 的 `ProgLoss` 机制，域损失权重也可以动态调整：
+
+| 训练阶段 | `ProgLoss` 状态 | 建议的域损失策略 |
+|---------|----------------|-----------------|
+| **早期** | one2many 权重高（0.8） | 保持较高域损失权重，强对抗训练 |
+| **后期** | one2one 权重高（0.9） | 降低域损失权重，避免干扰稳定特征 |
+
+这种设计符合直觉：当骨干网络更新活跃时需要强域适应，当网络趋于稳定时应减小域适应强度。
 
 #### 设置方式
 
@@ -144,20 +157,25 @@ model = YOLO("yolo26n-da.yaml")
 model.train(
     data="source.yaml",
     target_data="target.yaml",
-    domain_loss_weight=0.2,  # 自定义域适应损失权重
+    domain_loss_weight=0.2,       # 初始权重
+    domain_loss_final_weight=0.05, # 最终权重（线性/余弦衰减到该值）
+    domain_loss_schedule='linear', # 调度策略: 'fixed', 'linear', 'cosine'
     epochs=100
 )
 ```
 
 **方式2：命令行设置**
 ```bash
-yolo detect train model=yolo26n-da.yaml data=source.yaml target_data=target.yaml domain_loss_weight=0.2
+yolo detect train model=yolo26n-da.yaml data=source.yaml target_data=target.yaml \
+    domain_loss_weight=0.2 domain_loss_final_weight=0.05 domain_loss_schedule=linear
 ```
 
 **方式3：通过自定义配置文件**
 创建 `custom.yaml`：
 ```yaml
 domain_loss_weight: 0.2
+domain_loss_final_weight: 0.05
+domain_loss_schedule: 'cosine'
 epochs: 100
 ```
 
@@ -175,6 +193,8 @@ args = dict(
     data="source.yaml",
     target_data="target.yaml",
     domain_loss_weight=0.2,
+    domain_loss_final_weight=0.05,
+    domain_loss_schedule='linear',
     epochs=100
 )
 trainer = DomainAdaptationTrainer(overrides=args)

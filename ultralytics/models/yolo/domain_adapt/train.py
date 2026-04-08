@@ -119,7 +119,14 @@ class DomainAdaptationTrainer(BaseTrainer):
             _callbacks (list, optional): 回调函数列表。
         """
         super().__init__(cfg, overrides, _callbacks)
-        self.domain_loss_fn = DomainLoss()
+        # 初始化 DomainLoss，支持动态权重调度
+        self.domain_loss_fn = DomainLoss(
+            epsilon=0.1,  # 标签平滑参数
+            weight=self.args.domain_loss_weight,  # 初始权重
+            final_weight=self.args.domain_loss_final_weight,  # 最终权重
+            schedule=self.args.domain_loss_schedule,  # 调度策略
+            epochs=self.args.epochs,  # 总 epoch 数
+        )
 
     def build_dataset(
         self,
@@ -643,11 +650,11 @@ class DomainAdaptationTrainer(BaseTrainer):
 
                     original_yolo_loss = loss.sum()  # original_yolo_loss
 
-                    # 使用 DomainLoss 计算 domain_loss（包含标签平滑）
+                    # 使用 DomainLoss 计算 domain_loss（包含标签平滑和动态权重）
                     domain_loss = self.domain_loss_fn(
                         source_domain_preds,
                         target_domain_preds,
-                    ) * self.args.domain_loss_weight
+                    )  # 权重已在 DomainLoss 内部应用
     
                     # 合并loss
                     self.loss = original_yolo_loss + domain_loss
@@ -732,6 +739,10 @@ class DomainAdaptationTrainer(BaseTrainer):
 
             if hasattr(unwrap_model(self.model).criterion, "update"):
                 unwrap_model(self.model).criterion.update()
+            
+            # 更新 DomainLoss 的动态权重
+            if hasattr(self, "domain_loss_fn") and hasattr(self.domain_loss_fn, "update"):
+                self.domain_loss_fn.update()
 
             self.lr = {
                 f"lr/pg{ir}": x["lr"]

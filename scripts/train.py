@@ -58,7 +58,20 @@ def parse_args():
         "--domain-loss-weight",
         type=float,
         default=0.2,
-        help="域适应损失权重 (默认: 0.2)",
+        help="域适应损失初始权重 (默认: 0.2)",
+    )
+    parser.add_argument(
+        "--domain-loss-final-weight",
+        type=float,
+        default=0.05,
+        help="域适应损失最终权重，用于动态权重调度 (默认: 0.05)",
+    )
+    parser.add_argument(
+        "--domain-loss-schedule",
+        type=str,
+        default="fixed",
+        choices=["fixed", "linear", "cosine"],
+        help="域损失权重调度策略: 'fixed'=固定, 'linear'=线性衰减, 'cosine'=余弦衰减 (默认: fixed)",
     )
     parser.add_argument(
         "--grl-weight",
@@ -139,6 +152,9 @@ def main():
     print(f"批次大小: {args.batch}")
     print(f"图像尺寸: {args.imgsz}")
     print(f"域适应损失权重: {args.domain_loss_weight}")
+    if args.domain_loss_schedule != "fixed":
+        print(f"域适应损失最终权重: {args.domain_loss_final_weight}")
+        print(f"域适应损失调度策略: {args.domain_loss_schedule}")
     print(f"梯度反转层系数: {args.grl_weight}")
     print(f"目标域冻结BN更新: {args.bn_freeze}")
     print(f"设备: {args.device}")
@@ -164,6 +180,8 @@ def main():
         optimizer="MuSGD",
         deterministic=False,
         domain_loss_weight=args.domain_loss_weight,
+        domain_loss_final_weight=args.domain_loss_final_weight,
+        domain_loss_schedule=args.domain_loss_schedule,
         grl_weight=args.grl_weight,
         bn_freeze=args.bn_freeze,
         device=args.device,

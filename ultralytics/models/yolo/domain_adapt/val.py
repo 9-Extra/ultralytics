@@ -47,7 +47,14 @@ class DomainAdaptationValidator(BaseValidator):
         self.target_dataloader = target_dataloader
         self.target_metrics = DetMetrics() if target_dataloader is not None else None
         self.domain_stats = None  # Domain classification statistics
-        self.domain_loss_fn = DomainLoss()
+        # 验证器使用固定权重（不调度），但保持与训练器相同的初始配置
+        self.domain_loss_fn = DomainLoss(
+            epsilon=0.1,
+            weight=self.args.domain_loss_weight,
+            final_weight=self.args.domain_loss_final_weight,
+            schedule="fixed",  # 验证时固定权重
+            epochs=self.args.epochs,
+        )
     
     def _setup_model(self, trainer=None, model=None):
         """Setup model for validation.
@@ -223,11 +230,11 @@ class DomainAdaptationValidator(BaseValidator):
             dt_target, target_domain_preds = self._validate_dataloader(self.target_dataloader, model, augment, desc_suffix=" (target)")
             # 计算 domain_loss（需要同时有源域和目标域）
             if source_domain_preds is not None and target_domain_preds is not None:
-                # 使用 DomainLoss 计算 domain_loss（包含标签平滑）
+                # 使用 DomainLoss 计算 domain_loss（包含标签平滑和权重）
                 domain_loss = self.domain_loss_fn(
                     source_domain_preds,
                     target_domain_preds
-                ) * self.args.domain_loss_weight
+                )  # 权重已在 DomainLoss 内部应用
             else:
                 domain_loss = torch.tensor(0.0, device=self.device) # Yolov26原始模型没有域分类头，相关指标为0           
             
