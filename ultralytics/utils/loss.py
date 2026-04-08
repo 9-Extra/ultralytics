@@ -43,7 +43,7 @@ class DomainLoss(nn.Module):
         """
         super().__init__()
         self.epsilon = epsilon
-        self.register_buffer("scale_weights", torch.tensor([1.0, 0.1, 0.01]))
+        self.register_buffer("scale_weights", torch.tensor([1.0, 0.5, 0.25]))
 
     def forward(
         self,

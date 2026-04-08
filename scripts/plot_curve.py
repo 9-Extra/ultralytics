@@ -76,7 +76,7 @@ def plot_domain_curves(experiments: dict[str, pd.DataFrame], save_dir: Path):
     
     # 设置行标题
     row_titles = [
-        'Domain Accuracy (Source vs Target)',
+        'Domain Accuracy (Train vs Val)',
         'Domain Loss (Train)',
         'mAP50 (Validation - Source vs Target)'
     ]
@@ -91,14 +91,14 @@ def plot_domain_curves(experiments: dict[str, pd.DataFrame], save_dir: Path):
         # 设置列标题
         axes[0, col_idx].set_title(exp_name, fontsize=12, fontweight='bold')
         
-        # Row 0: 域分类准确率
+        # Row 0: 域分类准确率（训练集 vs 验证集）
         ax = axes[0, col_idx]
         if 'metrics/domain_acc' in df.columns:
             ax.plot(epochs, df['metrics/domain_acc'].values, 
-                   label='Source', color='blue', linewidth=1.5)
+                   label='Train', color='blue', linewidth=1.5)
         if 'target_metrics/domain_acc' in df.columns:
             ax.plot(epochs, df['target_metrics/domain_acc'].values, 
-                   label='Target', color='red', linewidth=1.5)
+                   label='Val', color='red', linewidth=1.5)
         ax.set_xlabel('Epoch')
         ax.legend(loc='best', fontsize=8)
         ax.grid(True, alpha=0.3)
@@ -161,14 +161,14 @@ def plot_individual_curves(experiments: dict[str, pd.DataFrame], save_dir: Path)
         
         epochs = df['epoch'].values
         
-        # 子图1: 域分类准确率
+        # 子图1: 域分类准确率（训练集 vs 验证集）
         ax = axes[0, 0]
         if 'metrics/domain_acc' in df.columns:
             ax.plot(epochs, df['metrics/domain_acc'].values, 
-                   label='Source Domain', color='blue', linewidth=2, marker='o', markersize=3)
+                   label='Train', color='blue', linewidth=2, marker='o', markersize=3)
         if 'target_metrics/domain_acc' in df.columns:
             ax.plot(epochs, df['target_metrics/domain_acc'].values, 
-                   label='Target Domain', color='red', linewidth=2, marker='s', markersize=3)
+                   label='Val', color='red', linewidth=2, marker='s', markersize=3)
         ax.set_xlabel('Epoch', fontsize=11)
         ax.set_ylabel('Domain Accuracy', fontsize=11)
         ax.set_title('Domain Classification Accuracy', fontsize=12)
