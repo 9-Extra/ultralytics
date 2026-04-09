@@ -38,7 +38,9 @@ class DomainLoss(nn.Module):
 
     Examples:
         >>> domain_loss = DomainLoss(epsilon=0.1, weight=0.2, final_weight=0.05, schedule='linear', epochs=100)
-        >>> loss = domain_loss(source_preds, target_preds)
+        >>> weighted_loss, raw_loss = domain_loss(source_preds, target_preds)
+        >>> # weighted_loss: for backprop (with dynamic weight)
+        >>> # raw_loss: for logging (unweighted, true domain classifier loss)
         >>> domain_loss.update()  # Call at the end of each epoch
     """
 
@@ -107,7 +109,7 @@ class DomainLoss(nn.Module):
         self,
         source_domain_preds: torch.Tensor,
         target_domain_preds: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute domain classification loss with label smoothing and progressive weighting.
 
         Args:
@@ -115,7 +117,9 @@ class DomainLoss(nn.Module):
             target_domain_preds: Domain predictions for target domain samples, shape (batch_size, C).
 
         Returns:
-            torch.Tensor: The computed domain classification loss (weighted by current weight).
+            tuple[torch.Tensor, torch.Tensor]: 
+                - weighted_loss: The computed domain classification loss weighted by current weight (for backprop)
+                - raw_loss: The unweighted domain classification loss (for logging and monitoring)
         """
         # Apply label smoothing: source = epsilon, target = 1 - epsilon
         source_labels = torch.full_like(source_domain_preds, self.epsilon)
@@ -134,8 +138,13 @@ class DomainLoss(nn.Module):
             self.scale_weights = self.scale_weights.to(loss.device)
             loss = loss * self.scale_weights
 
-        # Apply progressive weight
-        return loss.sum() * self.weight
+        # Compute raw loss (unweighted, for logging)
+        raw_loss = loss.sum()
+        
+        # Apply progressive weight for backprop
+        weighted_loss = raw_loss * self.weight
+        
+        return weighted_loss, raw_loss
 
 
 class VarifocalLoss(nn.Module):

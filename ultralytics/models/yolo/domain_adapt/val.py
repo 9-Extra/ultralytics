@@ -230,11 +230,11 @@ class DomainAdaptationValidator(BaseValidator):
             dt_target, target_domain_preds = self._validate_dataloader(self.target_dataloader, model, augment, desc_suffix=" (target)")
             # 计算 domain_loss（需要同时有源域和目标域）
             if source_domain_preds is not None and target_domain_preds is not None:
-                # 使用 DomainLoss 计算 domain_loss（包含标签平滑和权重）
-                domain_loss = self.domain_loss_fn(
+                # 使用 DomainLoss 计算 domain_loss（返回加权损失和原始损失）
+                _, domain_loss = self.domain_loss_fn(
                     source_domain_preds,
                     target_domain_preds
-                )  # 权重已在 DomainLoss 内部应用
+                )  # 验证时使用原始损失（不受动态权重影响）
             else:
                 domain_loss = torch.tensor(0.0, device=self.device) # Yolov26原始模型没有域分类头，相关指标为0           
             

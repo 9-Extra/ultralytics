@@ -651,15 +651,16 @@ class DomainAdaptationTrainer(BaseTrainer):
                     original_yolo_loss = loss.sum()  # original_yolo_loss
 
                     # 使用 DomainLoss 计算 domain_loss（包含标签平滑和动态权重）
-                    domain_loss = self.domain_loss_fn(
+                    domain_loss_weighted, domain_loss_raw = self.domain_loss_fn(
                         source_domain_preds,
                         target_domain_preds,
-                    )  # 权重已在 DomainLoss 内部应用
+                    )  # 返回 (加权损失, 原始损失)
     
-                    # 合并loss
-                    self.loss = original_yolo_loss + domain_loss
+                    # 合并loss: 使用加权损失进行反向传播
+                    self.loss = original_yolo_loss + domain_loss_weighted
+                    # 记录原始损失（不受动态权重影响，便于观察域分类器真实表现）
                     self.loss_items = torch.cat(
-                        (self.loss_items, domain_loss.detach().unsqueeze_(dim=0))
+                        (self.loss_items, domain_loss_raw.detach().unsqueeze_(dim=0))
                     )
                     
                     # 计算域分类准确率并纳入统计
