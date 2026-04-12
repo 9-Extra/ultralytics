@@ -568,7 +568,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                     }
                 )
                 
-                self.stop |= self.stopper(epoch + 1, self.fitness) if hasattr(self, 'stopper') else final_epoch
+                self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
                 
                 if self.args.save or final_epoch:
                     self.save_model()
