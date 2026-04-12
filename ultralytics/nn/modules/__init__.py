@@ -81,6 +81,7 @@ from .head import (
     OBB26,
     Classify,
     Detect,
+    DetectGAN,
     DetectGRL,
     DetectSeparateGRL,
     LRPCHead,

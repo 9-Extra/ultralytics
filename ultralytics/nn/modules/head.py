@@ -20,7 +20,7 @@ from .conv import Conv, DWConv, autopad
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "DetectGRL", "DetectSeparateGRL", "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect"
+__all__ = "DetectGRL", "DetectSeparateGRL", "DetectGAN", "OBB", "Classify", "Detect", "Pose", "RTDETRDecoder", "Segment", "YOLOEDetect", "YOLOESegment", "v10Detect"
 
 
 class Detect(nn.Module):
@@ -267,6 +267,26 @@ class ConvGN(nn.Module):
 
     def forward_fuse(self, x):
         return self.forward(x)
+
+class SpatialAttentionPooling(nn.Module):
+    def __init__(self, in_channels: int):
+        """
+        in_channels: 输入特征图的通道数
+        """
+        super().__init__()
+        self.attention_conv = nn.Conv2d(in_channels, 1, kernel_size=1)
+        
+    def forward(self, x):
+        # x shape: (B, C, H, W)
+        # 生成未归一化的注意力权重图
+        attn_logits = self.attention_conv(x)          # (B, 1, H, W)
+        # 在空间维度上做 softmax 归一化
+        attn_weights = F.softmax(attn_logits.view(x.size(0), -1), dim=1)
+        attn_weights = attn_weights.view_as(attn_logits)  # 恢复为 (B,1,H,W)
+        
+        # 加权求和： (B, C, H, W) * (B, 1, H, W) -> 在 H,W 上求和
+        pooled = torch.sum(x * attn_weights, dim=[2, 3], keepdim=True)   # (B, C, 1, 1)
+        return pooled
     
 class DetectGRL(Detect):
     """带有梯度反转层(GRL)的YOLO检测头，用于域自适应。
@@ -434,7 +454,7 @@ class DetectSeparateGRL(Detect):
                 )
                 for x in ch
             )
-        else:
+        elif False:
             # 复杂头
             self.domain_cls = nn.ModuleList(
                 nn.Sequential(
@@ -442,6 +462,20 @@ class DetectSeparateGRL(Detect):
                     ConvGN(x, c_dom, 3),
                     ConvGN(c_dom, c_dom, 1, act=False),
                     nn.AdaptiveAvgPool2d(1),
+                    ConvGN(c_dom, c_dom, 1),
+                    ConvGN(c_dom, 16, 1),
+
+                    nn.Conv2d(16, 1, 1),
+                )
+                for x in ch
+            )
+        else: 
+            self.domain_cls = nn.ModuleList(
+                nn.Sequential(
+                    GradientScalarLayer(-0.1),
+                    ConvGN(x, c_dom, 3),
+                    ConvGN(c_dom, c_dom, 1, act=False),
+                    SpatialAttentionPooling(c_dom),
                     ConvGN(c_dom, c_dom, 1),
                     ConvGN(c_dom, 16, 1),
 
@@ -497,6 +531,83 @@ class DetectSeparateGRL(Detect):
     def fuse(self) -> None:
         """移除域预测头"""
         super().fuse()
+
+
+class DetectGAN(Detect):
+    """GAN风格的YOLO检测头，返回骨干网络特征供独立域分类器使用。
+    
+    与DetectGRL不同，该类不包含内嵌域分类器，只返回多尺度特征。
+    域分类由外部独立的DomainDiscriminator完成，实现GAN风格的交替优化。
+    
+    Attributes:
+        nc (int): 类别数量。
+        nl (int): 检测层数量。
+        reg_max (int): DFL通道数。
+        no (int): 每个锚点的输出数量。
+        stride (torch.Tensor): 构建时计算的步长。
+        cv2 (nn.ModuleList): 边界框回归的卷积层。
+        cv3 (nn.ModuleList): 分类的卷积层。
+        dfl (nn.Module): 分布焦点损失层。
+        one2one_cv2 (nn.ModuleList): 一对一边界框回归的卷积层。
+        one2one_cv3 (nn.ModuleList): 一对一分组的卷积层。
+
+    Methods:
+        forward: 执行前向传播，返回检测结果和骨干特征。
+        bias_init: 初始化检测头偏置。
+    
+    Examples:
+        >>> detect = DetectGAN(nc=80, reg_max=1, end2end=True, ch=(256, 512, 1024))
+        >>> x = [torch.randn(1, 256, 80, 80), torch.randn(1, 512, 40, 40), torch.randn(1, 1024, 20, 20)]
+        >>> outputs = detect(x)
+        >>> print(outputs.keys())  # dict_keys(['one2many', 'one2one', 'backbone_features'])
+    """
+    
+    def __init__(self, nc: int = 80, reg_max=16, end2end=False, ch: tuple = ()):
+        """初始化GAN风格检测头。
+        
+        Args:
+            nc (int): 类别数量。
+            reg_max (int): DFL通道数，DetectGAN要求为1。
+            end2end (bool): 是否使用端到端NMS-free检测，DetectGAN要求为True。
+            ch (tuple): 骨干网络特征通道数元组。
+        """
+        assert end2end, "DetectGAN只考虑端到端模式"
+        assert reg_max == 1, "DetectGAN不使用DFL"
+        super().__init__(nc=nc, reg_max=reg_max, end2end=end2end, ch=ch)
+        # 不需要内嵌域分类器，域分类由外部判别器处理
+    
+    def forward(
+        self, x: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """前向传播，返回检测结果和骨干特征。
+        
+        Args:
+            x (list[torch.Tensor]): 多尺度特征列表。
+        
+        Returns:
+            训练模式下返回包含检测结果和骨干特征的字典；
+            推理模式下返回检测结果元组。
+        """
+        preds = self.forward_head(x, **self.one2many)
+        
+        if self.end2end:
+            # one2one分支使用detach避免影响one2many的梯度
+            x_detach = [xi.detach() for xi in x]
+            one2one = self.forward_head(x_detach, **self.one2one)
+            preds = {"one2many": preds, "one2one": one2one}
+        
+        # 保存原始特征供外部域分类器使用
+        # 注意：训练时使用原始特征（非detach），推理时可选择是否detach
+        preds["backbone_features"] = x
+        
+        if self.training:
+            return preds
+        
+        # 推理模式
+        y = self._inference(preds["one2one"] if self.end2end else preds)
+        if self.end2end:
+            y = self.postprocess(y.permute(0, 2, 1))
+        return y if self.export else (y, preds)
 
 
 class Segment(Detect):

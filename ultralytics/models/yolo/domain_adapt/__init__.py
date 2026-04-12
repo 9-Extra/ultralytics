@@ -4,4 +4,4 @@ from .predict import DomainAdaptationPredictor
 from .train import DomainAdaptationTrainer
 from .val import DomainAdaptationValidator
 
-__all__ = "DomainAdaptationPredictor", "DomainAdaptationTrainer", "DomainAdaptationValidator"
+__all__ = "DomainAdaptationPredictor", "DomainAdaptationTrainer", "DomainAdaptationValidator", "DomainAdaptationPredictor", "DomainAdaptationTrainer", "DomainAdaptationValidator"

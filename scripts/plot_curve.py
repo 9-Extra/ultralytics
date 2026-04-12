@@ -8,8 +8,14 @@
 3. 验证集上源域和目标域 mAP50 的变化
 
 布局：同一个实验的不同曲线位于同一列，不同实验的相同曲线位于同一行。
+
+用法：
+    python scripts/plot_curve.py                    # 绘制所有实验
+    python scripts/plot_curve.py -e exp1 exp2       # 只绘制 exp1 和 exp2
+    python scripts/plot_curve.py --experiments exp1 # 只绘制 exp1
 """
 
+import argparse
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -222,11 +228,51 @@ def plot_individual_curves(experiments: dict[str, pd.DataFrame], save_dir: Path)
         plt.close()
 
 
+def parse_args():
+    """解析命令行参数。"""
+    parser = argparse.ArgumentParser(
+        description='绘制域适应实验的曲线图',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python scripts/plot_curve.py                    # 绘制所有实验
+  python scripts/plot_curve.py -e exp1 exp2       # 只绘制 exp1 和 exp2
+  python scripts/plot_curve.py --experiments exp1 # 只绘制 exp1
+        """
+    )
+    
+    parser.add_argument(
+        '-e', '--experiments',
+        nargs='+',
+        default=None,
+        help='指定要绘制的实验名称（默认绘制所有实验），可指定多个，如: -e exp1 exp2'
+    )
+    
+    parser.add_argument(
+        '-o', '--output',
+        type=str,
+        default='./check',
+        help='输出目录（默认: ./check）'
+    )
+    
+    parser.add_argument(
+        '-i', '--input',
+        type=str,
+        default='./runs/detect',
+        help='实验结果目录（默认: ./runs/detect）'
+    )
+    
+    return parser.parse_args()
+
+
 def main():
     """主函数。"""
+    # 解析参数
+    args = parse_args()
+    
     # 路径设置
-    runs_dir = Path('./runs/detect')
-    save_dir = Path('./check')
+    runs_dir = Path(args.input)
+    save_dir = Path(args.output)
     save_dir.mkdir(parents=True, exist_ok=True)
     
     if not runs_dir.exists():
@@ -249,15 +295,37 @@ def main():
         print("错误: 未找到任何实验结果")
         return
     
-    print(f"\n共加载 {len(experiments)} 个实验")
+    # 如果指定了实验名称，则过滤
+    if args.experiments:
+        selected_experiments = {}
+        missing_experiments = []
+        
+        for exp_name in args.experiments:
+            if exp_name in experiments:
+                selected_experiments[exp_name] = experiments[exp_name]
+            else:
+                missing_experiments.append(exp_name)
+        
+        if missing_experiments:
+            print(f"\n警告: 以下实验未找到: {missing_experiments}")
+            print(f"可用实验: {list(experiments.keys())}")
+        
+        if not selected_experiments:
+            print("错误: 未找到任何指定的实验")
+            return
+        
+        experiments = selected_experiments
+        print(f"\n已选择 {len(experiments)} 个实验: {list(experiments.keys())}")
+    else:
+        print(f"\n共加载 {len(experiments)} 个实验（全部）")
     
     # 绘制对比曲线图（所有实验在同一图中）
     print("\n绘制对比曲线图...")
     plot_domain_curves(experiments, save_dir)
     
     # 为每个实验绘制单独的详细曲线图
-    print("\n绘制单独实验曲线图...")
-    plot_individual_curves(experiments, save_dir)
+    # print("\n绘制单独实验曲线图...")
+    # plot_individual_curves(experiments, save_dir)
     
     print("\n完成！所有曲线图已保存到:", save_dir)
 

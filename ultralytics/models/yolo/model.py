@@ -72,6 +72,54 @@ class YOLODA(Model):
             }
         }
 
+class YOLOGAN(Model):
+    """YOLO GAN-style Domain Adaptation (YOLOGAN) object detection model.
+
+    YOLOGAN implements GAN-style domain adaptation with an independent discriminator.
+    The backbone acts as the generator, and a separate domain discriminator is trained
+    adversarially using alternating optimization (k steps for D, 1 step for G).
+
+    Attributes:
+        model: The loaded YOLOGAN model instance.
+        task: Always set to 'detect' for object detection.
+        overrides: Configuration overrides for the model.
+
+    Methods:
+        __init__: Initialize YOLOGAN model with a configuration file or pre-trained model.
+        task_map: Map tasks to their corresponding model, trainer, validator, and predictor classes.
+
+    Examples:
+        Load a YOLOGAN model from YAML configuration
+        >>> model = YOLOGAN("yolo26n-gan.yaml")
+
+        Train the model with GAN-style domain adaptation
+        >>> model.train(data="source.yaml", target_data="target.yaml", epochs=100)
+    """
+
+    def __init__(
+        self, model: str | Path = "yolo26n-gan.yaml", verbose: bool = False
+    ) -> None:
+        """Initialize YOLOGAN model with a configuration file or pre-trained model.
+
+        Args:
+            model (str | Path): Path to the model configuration file (*.yaml) or pre-trained weights (*.pt).
+            verbose (bool): If True, prints additional information during initialization.
+        """
+        super().__init__(model=model, task="detect", verbose=verbose)
+
+    @property
+    def task_map(self) -> dict[str, dict[str, Any]]:
+        """Map head to model, trainer, validator, and predictor classes."""
+        return {
+            "detect": {
+                "model": DetectionModel,
+                "trainer": yolo.domain_adapt.GANDomainAdaptationTrainer,
+                "validator": yolo.domain_adapt.GANDomainAdaptationValidator,
+                "predictor": yolo.domain_adapt.DomainAdaptationPredictor,
+            }
+        }
+
+
 from ultralytics.utils import ROOT, YAML
 
 
@@ -142,6 +190,14 @@ class YOLO(Model):
             ".yml",
         }:  # if YOLODA model
             new_instance = YOLODA(path, verbose=verbose)
+            self.__class__ = type(new_instance)
+            self.__dict__ = new_instance.__dict__
+        elif "-gan" in path.stem and path.suffix in {
+            ".pt",
+            ".yaml",
+            ".yml",
+        }:  # if YOLOGAN model
+            new_instance = YOLOGAN(path, verbose=verbose)
             self.__class__ = type(new_instance)
             self.__dict__ = new_instance.__dict__
         else:
