@@ -529,8 +529,6 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
     def _train_generator(self, epoch: int, batch):
         """训练生成器，同时统计训练集域分类准确率。"""
-        self.optimizer.zero_grad()
-
         source_preds = self.model(batch["img"])
 
         if self.args.compile:
@@ -713,6 +711,9 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             # NaN recovery
             if self._handle_nan_recovery(epoch):
                 continue
+
+            if hasattr(unwrap_model(self.model).criterion, "update"):
+                unwrap_model(self.model).criterion.update()
 
             if RANK in {-1, 0}:
                 self.save_metrics(
