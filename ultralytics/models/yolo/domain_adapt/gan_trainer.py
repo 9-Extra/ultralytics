@@ -81,8 +81,8 @@ class DomainDiscriminator(nn.Module):
             self.encoders.append(
                 nn.Sequential(
                     nn.Conv2d(c, out_ch, 3, 1, 1),
-                    nn.GroupNorm(1, out_ch),
                     nn.ReLU(inplace=True),
+                    nn.InstanceNorm2d(out_ch, affine=True),
                     nn.Conv2d(out_ch, out_ch, 1),
                 )
             )
@@ -90,11 +90,12 @@ class DomainDiscriminator(nn.Module):
         # 特征融合层（全卷积）
         # 输入: hidden_dim (concatenated from all scales)
         self.fusion = nn.Sequential(
-            nn.Conv2d(hidden_dim, hidden_dim, 1, 1),
-            nn.GroupNorm(1, hidden_dim),
+            nn.Conv2d(hidden_dim, hidden_dim // 2, 3, 1, 1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim // 2, 1, 1),
-            nn.GroupNorm(1, hidden_dim),
+            nn.InstanceNorm2d(hidden_dim // 2, affine=True),
+            nn.Conv2d(hidden_dim // 2, hidden_dim // 2, 1, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim // 2, hidden_dim // 2, 1, 1),
             nn.ReLU(inplace=True),
         )
 
