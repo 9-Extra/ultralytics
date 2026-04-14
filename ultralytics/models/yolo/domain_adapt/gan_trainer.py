@@ -479,7 +479,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
     def _train_discriminator(self, epoch, batch):
         """训练判别器（k次迭代）。"""
 
-        if epoch < 2:
+        if not epoch >= self.epochs // 20:
             # 等骨干网络稍微收敛再训练
             return
 
@@ -579,6 +579,12 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             mode="train",
         )
 
+        if self.args.close_mosaic:
+            base_idx = (self.epochs - self.args.close_mosaic) * len(self.train_loader)
+            self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
+        if self.start_epoch > (self.epochs - self.args.close_mosaic):
+            self._close_dataloader_mosaic()
+
         nb = len(self.train_loader)
         nw = (
             max(round(self.args.warmup_epochs * nb), 100)
@@ -594,6 +600,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
         LOGGER.info(f"Starting GAN-style training for {self.epochs} epochs...")
 
         epoch = self.start_epoch
+        self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
         while True:
             self.epoch = epoch
             self.run_callbacks("on_train_epoch_start")
@@ -605,6 +612,10 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             self._model_train()
             if RANK != -1:
                 self.train_loader.sampler.set_epoch(epoch)
+
+            if epoch == (self.epochs - self.args.close_mosaic):
+                self._close_dataloader_mosaic()
+                self.train_loader.reset()
 
             pbar = enumerate(self.train_loader)
             if RANK in {-1, 0}:
@@ -684,6 +695,9 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                             batch["img"].shape[-1],
                         )
                     )
+                    self.run_callbacks("on_batch_end")
+                    if self.args.plots and ni in self.plot_idx:
+                        self.plot_training_samples(batch, ni)
 
                 self.run_callbacks("on_train_batch_end")
 
@@ -712,6 +726,8 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             if self._handle_nan_recovery(epoch):
                 continue
 
+            self.nan_recovery_attempts = 0
+
             if hasattr(unwrap_model(self.model).criterion, "update"):
                 unwrap_model(self.model).criterion.update()
 
@@ -732,6 +748,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
                 if self.args.save or final_epoch:
                     self.save_model()
+                    self.run_callbacks("on_model_save")
 
             self.run_callbacks("on_fit_epoch_end")
 
