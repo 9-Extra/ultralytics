@@ -7,12 +7,9 @@ This validator extends the standard DetectionValidator to also evaluate
 the domain discriminator's performance on both source and target domains.
 """
 
-from __future__ import annotations
-
-from typing import Any
-
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 
 from ultralytics.models.yolo.domain_adapt.val import DomainAdaptationValidator
 from ultralytics.utils import LOGGER, RANK
@@ -86,6 +83,7 @@ class GANDomainAdaptationValidator(DomainAdaptationValidator):
             return super().__call__(trainer, model)
         
         self.training = trainer is not None
+        target_stats = {}  # Initialize target_stats
         
         # Setup model
         model, augment = self._setup_model(trainer, model)
@@ -125,27 +123,30 @@ class GANDomainAdaptationValidator(DomainAdaptationValidator):
         else:
             dt_target = None
         
-        if self.training:
-            # Domain loss is not directly used for training in GAN mode, but we track it
-            self.loss = torch.zeros(4, device=self.device)  # box, cls, dfl, domain
-        
         if RANK in {-1, 0}:
             self.run_callbacks("on_val_end")
         
         if self.training:
             model.float()
             
+            # Reduce loss across all GPUs
+            loss = self.loss.clone().detach()
+            if trainer.world_size > 1:
+                dist.reduce(loss, dst=0, op=dist.ReduceOp.AVG)
+            
+            if RANK > 0:
+                return
+            
             # Merge all stats
             results = {
                 **stats,
                 **target_stats,
-                **trainer.label_loss_items(self.loss, prefix="val"),
-                **self.domain_stats,
+                **trainer.label_loss_items(loss / len(self.dataloader), prefix="val")
             }
             
             return {k: round(float(v), 5) for k, v in results.items()}
         else:
-            stats = {**stats, **target_stats, **self.domain_stats}
+            stats = {**stats, **target_stats}
             return stats
     
     def _validate_with_domain(self, model, is_target: bool = False):
