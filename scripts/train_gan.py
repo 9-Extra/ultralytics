@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-YOLO-GAN (GAN-style Domain Adaptation) 训练脚本
-使用 CityScape 数据集进行域适应训练 - GAN对抗训练版本
+YOLO-GAN (WGAN-GP Domain Adaptation) 训练脚本
+使用 CityScape 数据集进行域适应训练 - WGAN-GP 对抗训练版本
 
 架构:
   - 生成器: YOLOv26 骨干网络 + 检测头
-  - 判别器: 独立的域分类器 (DomainDiscriminator)
+  - 判别器: 独立的域分类器 (DomainDiscriminator/Critic)
   
 训练策略:
-  - 判别器每批次优化 k 次
+  - 判别器每批次优化 k 次 (WGAN-GP with Gradient Penalty)
   - 生成器每批次优化 1 次
   - 交替优化实现对抗训练
 
@@ -26,7 +26,7 @@ from ultralytics.models.yolo.domain_adapt.gan_trainer import GANDomainAdaptation
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
-        description="Train YOLO-GAN model for domain adaptation using GAN-style adversarial training"
+        description="Train YOLO-GAN model for domain adaptation using WGAN-GP adversarial training"
     )
 
     # 模型配置
@@ -67,24 +67,30 @@ def parse_args():
         "--lr0", type=float, default=0.01, help="生成器初始学习率 (默认: 0.01)"
     )
     
-    # GAN 特有超参数
+    # WGAN-GP 特有超参数
     parser.add_argument(
         "--d-steps",
         type=int,
-        default=3,
-        help="每批次判别器优化次数 (默认: 3)",
+        default=5,
+        help="每批次判别器优化次数 (默认: 5)",
     )
     parser.add_argument(
         "--d-lr",
         type=float,
-        default=0.001,
-        help="判别器学习率 (默认: 0.001)",
+        default=0.0001,
+        help="判别器学习率 (默认: 0.0001)",
     )
     parser.add_argument(
         "--lambda-adv",
         type=float,
         default=0.1,
         help="对抗损失权重 (默认: 0.1)",
+    )
+    parser.add_argument(
+        "--lambda-gp",
+        type=float,
+        default=10.0,
+        help="WGAN-GP 梯度惩罚系数 (默认: 10.0)",
     )
     parser.add_argument(
         "--discriminator-hidden",
@@ -149,7 +155,7 @@ def main():
     )
 
     print("=" * 70)
-    print("YOLO-GAN 域适应训练 (GAN-style Domain Adaptation)")
+    print("YOLO-GAN 域适应训练 (WGAN-GP Domain Adaptation)")
     print("=" * 70)
     print(f"模型: {model_path}")
     print(f"源域数据: {data_path}")
@@ -158,10 +164,11 @@ def main():
     print(f"批次大小: {args.batch}")
     print(f"图像尺寸: {args.imgsz}")
     print("-" * 70)
-    print("GAN 训练参数:")
+    print("WGAN-GP 训练参数:")
     print(f"  判别器每批次迭代: {args.d_steps}")
     print(f"  判别器学习率: {args.d_lr}")
     print(f"  对抗损失权重: {args.lambda_adv}")
+    print(f"  梯度惩罚系数: {args.lambda_gp}")
     print(f"  判别器隐藏层: {args.discriminator_hidden}")
     print("-" * 70)
     print(f"生成器学习率: {args.lr0}")
@@ -189,10 +196,11 @@ def main():
         "optimizer": "MuSGD",
         "cache": "disk",
         
-        # GAN 特有参数
+        # WGAN-GP 特有参数
         "d_steps": args.d_steps,
         "d_lr": args.d_lr,
         "lambda_adv": args.lambda_adv,
+        "lambda_gp": args.lambda_gp,
         "discriminator_hidden": args.discriminator_hidden,
         
         # 数据增强
@@ -207,7 +215,7 @@ def main():
         overrides["pretrained"] = args.weights
 
     # 创建训练器并开始训练
-    print("\n初始化 GAN Domain Adaptation Trainer...")
+    print("\n初始化 WGAN-GP Domain Adaptation Trainer...")
     trainer = GANDomainAdaptationTrainer(overrides=overrides)
     
     print("\n开始训练...\n")

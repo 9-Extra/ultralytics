@@ -8,7 +8,6 @@ the domain discriminator's performance on both source and target domains.
 """
 
 import torch
-import torch.nn.functional as F
 import torch.distributed as dist
 
 from ultralytics.models.yolo.domain_adapt.val import DomainAdaptationValidator
@@ -56,9 +55,9 @@ class GANDomainAdaptationValidator(DomainAdaptationValidator):
         super().__init__(dataloader, save_dir, args, _callbacks, target_dataloader)
         self.discriminator = discriminator
         self.domain_stats = {
-            "val_domain_loss": 0.0,
-            "val_source_acc": 0.0,
-            "val_target_acc": 0.0,
+            "loss": 0.0,
+            "source_score": 0.0,
+            "target_score": 0.0,
         }
     
     @smart_inference_mode()
@@ -221,58 +220,65 @@ class GANDomainAdaptationValidator(DomainAdaptationValidator):
         return dt, torch.cat(domain_preds) if domain_preds else None
     
     def _compute_domain_stats(self, source_preds: torch.Tensor, target_preds: torch.Tensor):
-        """Compute domain classification statistics.
+        """Compute domain statistics for WGAN-GP.
         
         Args:
-            source_preds: Domain predictions for source domain samples.
-            target_preds: Domain predictions for target domain samples.
+            source_preds: Domain critic scores for source domain samples.
+            target_preds: Domain critic scores for target domain samples.
         """
         if source_preds is None or target_preds is None:
             self.domain_stats = {
-                "loss": 0,
-                "total": 0,
-                "accuracy": 0,
-                "precision": 0,
-                "recall": 0,
+                "loss": 0.0,
+                "source_score": 0.0,
+                "target_score": 0.0,
             }
             return
         
-        # Compute domain classification loss
-        source_labels = torch.zeros_like(source_preds)
-        target_labels = torch.ones_like(target_preds)
-        
-        loss_source = F.binary_cross_entropy_with_logits(source_preds, source_labels, reduction="sum")
-        loss_target = F.binary_cross_entropy_with_logits(target_preds, target_labels, reduction="sum")
-        domain_loss = loss_source + loss_target
-        
-        # Compute accuracies
-        # Source domain: should be classified as 0 (logit < 0)
-        source_correct = (source_preds < 0).sum().item()
-        source_total = source_preds.numel()
-        
-        # Target domain: should be classified as 1 (logit >= 0)
-        target_correct = (target_preds >= 0).sum().item()
-        target_total = target_preds.numel()
-        
-        total = source_total + target_total
-        accuracy = (source_correct + target_correct) / total if total > 0 else 0.0
-        
-        tp = target_correct
-        fp = source_total - source_correct
-        fn = target_total - target_correct
-        
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        # WGAN domain loss: Wasserstein distance estimate
+        domain_loss = target_preds.mean() - source_preds.mean()
         
         self.domain_stats = {
             "loss": domain_loss.item(),
-            "total": total,
-            "accuracy": accuracy,
-            "precision": precision,
-            "recall": recall,
+            "source_score": source_preds.mean().item(),
+            "target_score": target_preds.mean().item(),
         }
     
     
+    def print_results(self, is_target: bool = False) -> None:
+        """Print validation results with WGAN-GP domain metrics.
+        
+        Args:
+            is_target: Whether this is target domain validation.
+        """
+        from ultralytics.utils import LOGGER
+        
+        metrics = self.target_metrics if is_target else self.metrics
+        seen = len(self.target_dataloader.dataset) if is_target else self.seen
+        domain_label = "Target" if is_target else "Source"
+        
+        pf = "%22s" + "%11i" * 2 + "%11.3g" * len(metrics.keys)
+        LOGGER.info(pf % ("all", seen, metrics.nt_per_class.sum(), *metrics.mean_results()))
+        if metrics.nt_per_class.sum() == 0:
+            LOGGER.warning(f"no labels found in {self.args.task} set {domain_label}, cannot compute metrics without labels")
+
+        if self.args.verbose and not self.training and self.nc > 1 and len(metrics.stats):
+            for i, c in enumerate(metrics.ap_class_index):
+                LOGGER.info(
+                    pf
+                    % (
+                        self.names[c],
+                        metrics.nt_per_image[c],
+                        metrics.nt_per_class[c],
+                        *metrics.class_result(i),
+                    )
+                )
+        
+        if is_target and self.domain_stats is not None:
+            LOGGER.info(f"{'Domain Metrics:':>22}{'loss':>11s}{'source_score':>11s}{'target_score':>11s}")
+            LOGGER.info(
+                f"{'Domain:':>22}{self.domain_stats['loss']:>11.3f}{self.domain_stats['source_score']:>11.3f}{self.domain_stats['target_score']:>11.3f}"
+            )
+
     def get_desc(self) -> str:
         """Return description string for progress bar."""
         return ("%22s" + "%11s" * 6) % ("Class", "Images", "Instances", "Box(P", "R", "mAP50", "mAP50-95)")

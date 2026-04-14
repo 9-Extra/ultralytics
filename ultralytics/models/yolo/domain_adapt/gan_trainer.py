@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import distributed as dist
+from torch import GradScaler, distributed as dist
 
 from ultralytics.data.build import build_dataloader, build_yolo_dataset
 from ultralytics.engine.trainer import BaseTrainer
@@ -167,6 +167,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                 "d_steps",
                 "d_lr",
                 "lambda_adv",
+                "lambda_gp",
                 "discriminator_hidden",
                 "discriminator_ch",
             ]
@@ -177,11 +178,13 @@ class GANDomainAdaptationTrainer(BaseTrainer):
         super().__init__(cfg, overrides, _callbacks)
 
         # GAN特有参数
-        self.d_steps = gan_params.get("d_steps", 3)
+        self.d_steps = gan_params.get("d_steps", 5)
         self.d_lr = gan_params.get("d_lr", 0.0001)
         self.lambda_adv = gan_params.get("lambda_adv", 0.1)
+        self.lambda_gp = gan_params.get("lambda_gp", 10.0)
         self.discriminator_hidden = gan_params.get("discriminator_hidden", 256)
 
+        self.discriminator_amp = self.amp and True # 判别器训练是否使用半精度
         # 待初始化
         self.discriminator = None
         self.d_optimizer = None
@@ -190,7 +193,8 @@ class GANDomainAdaptationTrainer(BaseTrainer):
         self.target_iter = None
 
         # 训练统计
-        self.train_domain_stats = {"correct": 0, "total": 0}
+        self.train_domain_stats = {}  # 每epoch前会重新初始化
+        self.last_losses = None
 
     def _setup_discriminator(self):
         """初始化域分类器（判别器），自动检测输入通道数。"""
@@ -213,26 +217,20 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
         self.discriminator.to(self.device)
 
-        # 判别器优化器
-        self.d_optimizer = torch.optim.AdamW(
-            self.discriminator.parameters(), lr=self.d_lr / 10, betas=(0.9, 0.999)
+        # 判别器优化器 (WGAN-GP 推荐 Adam with beta1=0)
+        self.d_optimizer = torch.optim.Adam(
+            self.discriminator.parameters(), lr=self.d_lr, betas=(0.5, 0.9)
         )
 
-        # self.d_optimizer = torch.optim.SGD(
-        #     self.discriminator.parameters(),
-        #     lr=self.d_lr
-        # )
-
         # 判别器独立的 GradScaler
-        from torch.amp import GradScaler
-
-        self.d_scaler = GradScaler("cuda", enabled=self.amp)
+        self.d_scaler = GradScaler("cuda", enabled=self.discriminator_amp)
 
         LOGGER.info(
             f"域分类器初始化完成: input_ch={self.discriminator_ch}, hidden={self.discriminator_hidden}"
         )
         LOGGER.info(
-            f"GAN训练参数: d_steps={self.d_steps}, d_lr={self.d_lr}, lambda_adv={self.lambda_adv}"
+            f"WGAN-GP训练参数: d_steps={self.d_steps}, d_lr={self.d_lr}, "
+            f"lambda_adv={self.lambda_adv}, lambda_gp={self.lambda_gp}"
         )
 
     def get_dataset(self):
@@ -476,10 +474,45 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
         return self.metrics, self.fitness
 
-    def _train_discriminator(self, epoch, batch):
-        """训练判别器（k次迭代）。"""
+    def _gradient_penalty(
+        self,
+        real_features: list[torch.Tensor],
+        fake_features: list[torch.Tensor],
+    ) -> torch.Tensor:
+        """计算多尺度特征输入下的 Gradient Penalty."""
+        batch_size = real_features[0].size(0)
+        alpha = torch.rand(batch_size, 1, 1, 1, device=self.device)
 
-        if epoch < 2:
+        interpolates = []
+        for real, fake in zip(real_features, fake_features):
+            interp = alpha * real + (1 - alpha) * fake
+            # 强制 float32 全精度，避免 AMP 低精度下二阶梯度数值不稳定
+            interp = interp.float()
+            interp.requires_grad_(True)
+            interpolates.append(interp)
+
+        with autocast(False):
+            d_interpolates = self.discriminator(interpolates)
+
+        gradients = torch.autograd.grad(
+            outputs=d_interpolates,
+            inputs=interpolates,
+            grad_outputs=torch.ones_like(d_interpolates),
+            create_graph=True,  # penalty用于损失计算后，其梯度为二阶梯度，因此需要为“求梯度”本身创建计算图
+            retain_graph=True,
+            only_inputs=True,
+        )
+
+        penalty = 0.0
+        for grad in gradients:
+            grad = grad.view(grad.size(0), -1)
+            penalty += ((grad.norm(2, dim=1) - 1) ** 2).mean()
+        return penalty
+
+    def _train_discriminator(self, epoch, batch):
+        """训练判别器（k次迭代）- WGAN-GP."""
+
+        if not epoch >= self.epochs // 20:
             # 等骨干网络稍微收敛再训练
             return
 
@@ -492,43 +525,43 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                 target_features: list[torch.Tensor] = self.model(batch["domain_img"])[
                     "backbone_features"
                 ]
-                all_features = [
-                    torch.cat((s, t)) for s, t in zip(source_features, target_features)
-                ]
-                del source_features, target_features
-        pass
+            if not self.discriminator_amp:    
+                source_features = [f.float() for f in source_features]
+                target_features = [f.float() for f in target_features]
 
         # 训练判别器 k 次
-        # loss = []
+        # losses = []
         for _ in range(self.d_steps):
             self.d_optimizer.zero_grad()
 
-            with autocast(self.amp):
-                d_logits: torch.Tensor = self.discriminator(all_features)
+            with autocast(self.discriminator_amp):
+                d_source = self.discriminator(source_features)
+                d_target = self.discriminator(target_features)
 
-                # 源域标签=0，目标域标签=1
-                d_labels = torch.ones_like(d_logits)
-                d_labels[: d_labels.shape[0] // 2] = 0
-
-                loss_d = F.binary_cross_entropy_with_logits(
-                    d_logits, d_labels, reduction="sum"
-                )
-                # loss.append(loss_d.item())
-
+                # Wasserstein 距离: 最大化 D(target) - D(source)
+                # score越高，表示判别器认为其偏离了源域
+                wasserstein = d_target.mean() - d_source.mean()
+                gp = self._gradient_penalty(source_features, target_features)
+                loss_d = -wasserstein + self.lambda_gp * gp
+            
             self.d_scaler.scale(loss_d).backward()
-            self.d_scaler.unscale_(self.d_optimizer)  # unscale gradients
-            torch.nn.utils.clip_grad_norm_(
-                self.discriminator.parameters(), max_norm=10.0
-            )
             self.d_scaler.step(self.d_optimizer)
             self.d_scaler.update()
-
+            
+            # with torch.no_grad():
+            #     losses.append(torch.stack((loss_d, wasserstein, gp, d_source.max(), d_target.max())))
+        
         pass
-
-        # print(loss)
+    
+        # losses = torch.stack(losses)
+        # print(losses)
+        # if self.last_losses is not None:
+        #     print(self.last_losses)
+        # self.last_losses = losses.to(device="cpu", non_blocking=True)
+        
 
     def _train_generator(self, epoch: int, batch):
-        """训练生成器，同时统计训练集域分类准确率。"""
+        """训练生成器，同时统计训练集域分类准确率 - WGAN-GP."""
         self.optimizer.zero_grad()
 
         source_preds = self.model(batch["img"])
@@ -542,22 +575,23 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             # 从1/20轮后再开始对抗训练
             target_preds = self.model(batch["domain_img"])
 
-            d_logits: torch.Tensor = self.discriminator(target_preds["backbone_features"])
-            d_labels = torch.zeros_like(
-                d_logits
-            )  # 对生成器，希望判别器将所有目标域特征归为源域（不关心源域特征结果）
-
-            loss_adv = F.binary_cross_entropy_with_logits(
-                d_logits, d_labels, reduction="sum"
+            d_target_scores: torch.Tensor = self.discriminator(
+                target_preds["backbone_features"]
             )
 
+            # WGAN 生成器损失：最小化 D(target)，即让目标域 score 接近源域
+            loss_adv = d_target_scores.mean()
+
             with torch.no_grad():
-                # 统计训练集上正确率
-                d_source, d_target = d_logits.chunk(2)
-                source_correct = (d_source < 0).sum().item()
-                target_correct = (d_target >= 0).sum().item()
-                self.train_domain_stats["correct"] += source_correct + target_correct
-                self.train_domain_stats["total"] += d_logits.numel()
+                # 同时计算 source score 用于统计准确率和平均分数
+                d_source_scores = self.discriminator(
+                    source_preds["backbone_features"]
+                )
+                # 累加在 GPU tensor 上，避免每个 batch 都同步到 CPU
+                self.train_domain_stats["source_score_sum"] += d_source_scores.sum()
+                self.train_domain_stats["target_score_sum"] += d_target_scores.sum()
+                self.train_domain_stats["source_count"] += d_source_scores.numel()
+                self.train_domain_stats["target_count"] += d_target_scores.numel()
         else:
             loss_adv = torch.tensor(0, device=self.device, dtype=loss_det.dtype)
 
@@ -614,7 +648,14 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                 pbar = TQDM(enumerate(self.train_loader), total=nb)
 
             self.tloss = None
-            self.train_domain_stats = {"correct": 0, "total": 0}
+            # 使用 GPU tensor 累加统计量，仅在 epoch 结束时做一次 .item() 同步
+            device = self.device
+            self.train_domain_stats = {
+                "source_score_sum": torch.tensor(0.0, dtype=torch.float32, device=device),
+                "target_score_sum": torch.tensor(0.0, dtype=torch.float32, device=device),
+                "source_count": torch.tensor(0, dtype=torch.int64, device=device),
+                "target_count": torch.tensor(0, dtype=torch.int64, device=device),
+            }
 
             for i, batch in pbar:
                 self.run_callbacks("on_train_batch_start")
@@ -688,11 +729,18 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                     )
 
                 self.run_callbacks("on_train_batch_end")
-
-            train_domain_acc = (
-                self.train_domain_stats["correct"] / self.train_domain_stats["total"]
-                if self.train_domain_stats["total"] > 0
-                else 0.0
+            pass # batch end
+        
+            # epoch 结束时统一将 GPU 统计量同步到 CPU（仅一次）
+            source_count = self.train_domain_stats["source_count"].item()
+            train_source_score = (
+                self.train_domain_stats["source_score_sum"].item() / source_count
+                if source_count > 0 else 0.0
+            )
+            target_count = self.train_domain_stats["target_count"].item()
+            train_target_score = (
+                self.train_domain_stats["target_score_sum"].item() / target_count
+                if target_count > 0 else 0.0
             )
 
             self.lr = {
@@ -720,10 +768,14 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                         **self.label_loss_items(self.tloss, prefix="train"),
                         **self.metrics,
                         **self.lr,
-                        "train/domain_acc": train_domain_acc,
-                        "target_metrics/domain_acc": self.validator.domain_stats[
-                            "accuracy"
-                        ],
+                        "train/source_scores": train_source_score,
+                        "train/target_scores": train_target_score,
+                        "val/source_scores": self.validator.domain_stats.get(
+                            "source_score", 0.0
+                        ),
+                        "val/target_scores": self.validator.domain_stats.get(
+                            "target_score", 0.0
+                        ),
                     }
                 )
 
