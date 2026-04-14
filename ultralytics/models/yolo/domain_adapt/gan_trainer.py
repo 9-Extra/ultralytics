@@ -627,7 +627,14 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
         LOGGER.info(f"Starting GAN-style training for {self.epochs} epochs...")
 
+        if self.args.close_mosaic:
+            base_idx = (self.epochs - self.args.close_mosaic) * nb
+            self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
+        if self.start_epoch > (self.epochs - self.args.close_mosaic):
+            self._close_dataloader_mosaic()
+
         epoch = self.start_epoch
+        self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
         while True:
             self.epoch = epoch
             self.run_callbacks("on_train_epoch_start")
@@ -639,6 +646,10 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             self._model_train()
             if RANK != -1:
                 self.train_loader.sampler.set_epoch(epoch)
+
+            if epoch == (self.epochs - self.args.close_mosaic):
+                self._close_dataloader_mosaic()
+                self.train_loader.reset()
 
             pbar = enumerate(self.train_loader)
             if RANK in {-1, 0}:
@@ -725,6 +736,9 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                             batch["img"].shape[-1],
                         )
                     )
+                    self.run_callbacks("on_batch_end")
+                    if self.args.plots and ni in self.plot_idx:
+                        self.plot_training_samples(batch, ni)
 
                 self.run_callbacks("on_train_batch_end")
             pass # batch end
@@ -759,6 +773,8 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             # NaN recovery
             if self._handle_nan_recovery(epoch):
                 continue
+
+            self.nan_recovery_attempts = 0
             
             if hasattr(unwrap_model(self.model).criterion, "update"):
                 unwrap_model(self.model).criterion.update()
@@ -784,6 +800,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
                 if self.args.save or final_epoch:
                     self.save_model()
+                    self.run_callbacks("on_model_save")
 
             self.run_callbacks("on_fit_epoch_end")
 
