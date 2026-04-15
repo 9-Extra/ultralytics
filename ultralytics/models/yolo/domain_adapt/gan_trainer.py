@@ -9,8 +9,6 @@ This module implements a GAN-style training approach for domain adaptation:
 - Training strategy: Alternate optimization (k steps for D, 1 step for G)
 """
 
-from __future__ import annotations
-
 import math
 import random
 import time
@@ -22,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.amp import GradScaler
 from torch import distributed as dist
 
 from ultralytics.data.build import build_dataloader, build_yolo_dataset
@@ -224,8 +223,6 @@ class GANDomainAdaptationTrainer(BaseTrainer):
         # )
 
         # 判别器独立的 GradScaler
-        from torch.amp import GradScaler
-
         self.d_scaler = GradScaler("cuda", enabled=self.amp)
 
         LOGGER.info(
@@ -508,7 +505,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
                 # 源域标签=0，目标域标签=1
                 d_labels = torch.ones_like(d_logits)
-                d_labels[: d_labels.shape[0] // 2] = 0
+                d_labels[: d_labels.shape[0] // 2] = 0.1  # 单侧标签平滑：源域=0.1，目标域=1
 
                 loss_d = F.binary_cross_entropy_with_logits(
                     d_logits, d_labels, reduction="sum"
@@ -516,10 +513,6 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                 # loss.append(loss_d.item())
 
             self.d_scaler.scale(loss_d).backward()
-            self.d_scaler.unscale_(self.d_optimizer)  # unscale gradients
-            torch.nn.utils.clip_grad_norm_(
-                self.discriminator.parameters(), max_norm=10.0
-            )
             self.d_scaler.step(self.d_optimizer)
             self.d_scaler.update()
 
@@ -541,19 +534,19 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             target_preds = self.model(batch["domain_img"])
 
             d_logits: torch.Tensor = self.discriminator(target_preds["backbone_features"])
-            d_labels = torch.zeros_like(
-                d_logits
-            )  # 对生成器，希望判别器将所有目标域特征归为源域（不关心源域特征结果）
+            d_labels = torch.full_like(
+                d_logits, 0.1
+            )  # 单侧标签平滑：对生成器，希望判别器将目标域特征归为源域（0.1）
 
             loss_adv = F.binary_cross_entropy_with_logits(
                 d_logits, d_labels, reduction="sum"
             )
 
             with torch.no_grad():
-                # 统计训练集上正确率
+                # 统计训练集上正确率（在GPU内累加，避免每batch同步）
                 d_source, d_target = d_logits.chunk(2)
-                source_correct = (d_source < 0).sum().item()
-                target_correct = (d_target >= 0).sum().item()
+                source_correct = (d_source < 0).sum()
+                target_correct = (d_target >= 0).sum()
                 self.train_domain_stats["correct"] += source_correct + target_correct
                 self.train_domain_stats["total"] += d_logits.numel()
         else:
@@ -623,7 +616,10 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                 pbar = TQDM(enumerate(self.train_loader), total=nb)
 
             self.tloss = None
-            self.train_domain_stats = {"correct": 0, "total": 0}
+            self.train_domain_stats = {
+                "correct": torch.tensor(0, device=self.device),
+                "total": 0,
+            }
 
             for i, batch in pbar:
                 self.run_callbacks("on_train_batch_start")
@@ -701,9 +697,10 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
                 self.run_callbacks("on_train_batch_end")
 
+            total = self.train_domain_stats["total"]
             train_domain_acc = (
-                self.train_domain_stats["correct"] / self.train_domain_stats["total"]
-                if self.train_domain_stats["total"] > 0
+                self.train_domain_stats["correct"].item() / total
+                if total > 0
                 else 0.0
             )
 
