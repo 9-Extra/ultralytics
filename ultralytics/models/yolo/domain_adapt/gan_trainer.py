@@ -165,7 +165,8 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             gan_keys = [
                 "d_steps",
                 "d_lr",
-                "lambda_adv",
+                "lambda_start",
+                "lambda_end",
                 "discriminator_hidden",
                 "discriminator_ch",
             ]
@@ -178,7 +179,9 @@ class GANDomainAdaptationTrainer(BaseTrainer):
         # GAN特有参数
         self.d_steps = gan_params.get("d_steps", 3)
         self.d_lr = gan_params.get("d_lr", 0.0001)
-        self.lambda_adv = gan_params.get("lambda_adv", 0.1)
+        self.lambda_start = gan_params.get("lambda_start", 0.008)
+        self.lambda_end = gan_params.get("lambda_end", 0.002)
+        self.lambda_adv = self.lambda_start
         self.discriminator_hidden = gan_params.get("discriminator_hidden", 256)
 
         # 待初始化
@@ -570,6 +573,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
         self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
         while True:
             self.epoch = epoch
+            self.lambda_adv = self.lambda_start + (self.lambda_end - self.lambda_start) * (epoch / max(1, self.epochs - 1))
             self.run_callbacks("on_train_epoch_start")
 
             with warnings.catch_warnings():

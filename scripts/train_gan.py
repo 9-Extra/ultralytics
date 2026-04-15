@@ -81,10 +81,16 @@ def parse_args():
         help="判别器学习率 (默认: 0.001)",
     )
     parser.add_argument(
-        "--lambda-adv",
+        "--lambda-start",
         type=float,
-        default=0.1,
-        help="对抗损失权重 (默认: 0.1)",
+        default=0.008,
+        help="对抗损失初始权重 (默认: 0.008)",
+    )
+    parser.add_argument(
+        "--lambda-end",
+        type=float,
+        default=0.002,
+        help="对抗损失最终权重 (默认: 0.002)",
     )
     parser.add_argument(
         "--discriminator-hidden",
@@ -161,7 +167,8 @@ def main():
     print("GAN 训练参数:")
     print(f"  判别器每批次迭代: {args.d_steps}")
     print(f"  判别器学习率: {args.d_lr}")
-    print(f"  对抗损失权重: {args.lambda_adv}")
+    print(f"  对抗损失初始权重: {args.lambda_start}")
+    print(f"  对抗损失最终权重: {args.lambda_end}")
     print(f"  判别器隐藏层: {args.discriminator_hidden}")
     print("-" * 70)
     print(f"生成器学习率: {args.lr0}")
@@ -192,7 +199,8 @@ def main():
         # GAN 特有参数
         "d_steps": args.d_steps,
         "d_lr": args.d_lr,
-        "lambda_adv": args.lambda_adv,
+        "lambda_start": args.lambda_start,
+        "lambda_end": args.lambda_end,
         "discriminator_hidden": args.discriminator_hidden,
         
         # 数据增强
