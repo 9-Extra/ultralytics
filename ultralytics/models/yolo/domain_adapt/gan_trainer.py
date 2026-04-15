@@ -28,6 +28,7 @@ from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models.yolo.domain_adapt.gan_validator import (
     GANDomainAdaptationValidator,
 )
+from ultralytics.utils.torch_utils import unset_deterministic
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK, colorstr
 from ultralytics.utils.torch_utils import (
@@ -520,12 +521,10 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             with torch.no_grad():
                 # 统计训练集上正确率（在GPU内累加，避免每batch同步）
                 d_logits_source = self.discriminator([f.detach() for f in source_preds["backbone_features"]])
-                d_logits = torch.cat([d_logits_source, d_logits_target])
-                d_source, d_target = d_logits.chunk(2)
-                source_correct = (d_source < 0).sum()
-                target_correct = (d_target >= 0).sum()
+                source_correct = (d_logits_source < 0).sum()
+                target_correct = (d_logits_target >= 0).sum()
                 self.train_domain_stats["correct"] += source_correct + target_correct
-                self.train_domain_stats["total"] += d_logits.numel()
+                self.train_domain_stats["total"] += d_logits_source.numel() + d_logits_target.numel()
         else:
             loss_adv = torch.tensor(0, device=self.device, dtype=loss_det.dtype)
 
@@ -757,7 +756,6 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                 self.plot_metrics()
             self.run_callbacks("on_train_end")
         self._clear_memory()
-        from ultralytics.utils.torch_utils import unset_deterministic
 
         unset_deterministic()
         self.run_callbacks("teardown")

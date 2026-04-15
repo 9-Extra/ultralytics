@@ -48,8 +48,9 @@ def load_experiment_data(exp_path: Path) -> tuple[str, pd.DataFrame | None]:
 
 def is_domain_adaptation_exp(df: pd.DataFrame) -> bool:
     """检查是否为域适应实验（包含域适应特有的列）。"""
-    required_cols = ['train/dom_loss', 'metrics/domain_acc', 'target_metrics/domain_acc']
-    return all(col in df.columns for col in required_cols)
+    legacy_cols = ['train/dom_loss', 'metrics/domain_acc', 'target_metrics/domain_acc']
+    gan_cols = ['train/source_scores', 'train/target_scores']
+    return all(col in df.columns for col in legacy_cols) or all(col in df.columns for col in gan_cols)
 
 
 def plot_domain_curves(experiments: dict[str, pd.DataFrame], save_dir: Path):
@@ -70,7 +71,7 @@ def plot_domain_curves(experiments: dict[str, pd.DataFrame], save_dir: Path):
     }
     
     if not da_experiments:
-        print("警告: 未找到域适应实验（需要包含 train/dom_loss, metrics/domain_acc 等列）")
+        print("警告: 未找到域适应实验（需要包含 train/dom_loss + metrics/domain_acc 或 train/source_scores + train/target_scores 等列）")
         return
     
     print(f"找到 {len(da_experiments)} 个域适应实验: {list(da_experiments.keys())}")
@@ -80,9 +81,18 @@ def plot_domain_curves(experiments: dict[str, pd.DataFrame], save_dir: Path):
     n_exps = len(da_experiments)
     fig, axes = plt.subplots(3, n_exps, figsize=(5 * n_exps, 12), squeeze=False)
     
-    # 设置行标题
+    # 自适应行标题
+    has_legacy_da = any('metrics/domain_acc' in df.columns for df in da_experiments.values())
+    has_gan_da = any('train/source_scores' in df.columns for df in da_experiments.values())
+    if has_gan_da and not has_legacy_da:
+        domain_row_title = 'Domain Scores (Source vs Target)'
+    elif has_legacy_da and not has_gan_da:
+        domain_row_title = 'Domain Accuracy (Train vs Val)'
+    else:
+        domain_row_title = 'Domain Metric'
+    
     row_titles = [
-        'Domain Accuracy (Train vs Val)',
+        domain_row_title,
         'Domain Loss (Train)',
         'mAP50 (Validation - Source vs Target)'
     ]
@@ -97,27 +107,51 @@ def plot_domain_curves(experiments: dict[str, pd.DataFrame], save_dir: Path):
         # 设置列标题
         axes[0, col_idx].set_title(exp_name, fontsize=12, fontweight='bold')
         
-        # Row 0: 域分类准确率（训练集 vs 验证集）
+        # Row 0: 域分类准确率（legacy）或域分数（GAN/WGAN-GP）
         ax = axes[0, col_idx]
+        has_domain_metric = False
         if 'metrics/domain_acc' in df.columns:
-            ax.plot(epochs, df['metrics/domain_acc'].values, 
+            ax.plot(epochs, df['metrics/domain_acc'].values,
                    label='Train', color='blue', linewidth=1.5)
+            has_domain_metric = True
         if 'target_metrics/domain_acc' in df.columns:
-            ax.plot(epochs, df['target_metrics/domain_acc'].values, 
+            ax.plot(epochs, df['target_metrics/domain_acc'].values,
                    label='Val', color='red', linewidth=1.5)
+            has_domain_metric = True
+        if 'train/source_scores' in df.columns:
+            ax.plot(epochs, df['train/source_scores'].values,
+                   label='Train Source', color='blue', linewidth=1.5, linestyle='-')
+            has_domain_metric = True
+        if 'train/target_scores' in df.columns:
+            ax.plot(epochs, df['train/target_scores'].values,
+                   label='Train Target', color='red', linewidth=1.5, linestyle='-')
+            has_domain_metric = True
+        if 'val/source_scores' in df.columns:
+            ax.plot(epochs, df['val/source_scores'].values,
+                   label='Val Source', color='cyan', linewidth=1.5, linestyle='--')
+            has_domain_metric = True
+        if 'val/target_scores' in df.columns:
+            ax.plot(epochs, df['val/target_scores'].values,
+                   label='Val Target', color='orange', linewidth=1.5, linestyle='--')
+            has_domain_metric = True
         ax.set_xlabel('Epoch')
-        ax.legend(loc='best', fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.set_ylim([0, 1.05])
+        if has_domain_metric:
+            ax.legend(loc='best', fontsize=8)
+            ax.grid(True, alpha=0.3)
+        if 'metrics/domain_acc' in df.columns or 'target_metrics/domain_acc' in df.columns:
+            ax.set_ylim([0, 1.05])
         
         # Row 1: Domain Loss
         ax = axes[1, col_idx]
         if 'train/dom_loss' in df.columns:
-            ax.plot(epochs, df['train/dom_loss'].values, 
+            ax.plot(epochs, df['train/dom_loss'].values,
                    label='Train dom_loss', color='green', linewidth=1.5)
-            ax.set_xlabel('Epoch')
-            ax.legend(loc='best', fontsize=8)
-            ax.grid(True, alpha=0.3)
+        elif 'train/adv_loss' in df.columns:
+            ax.plot(epochs, df['train/adv_loss'].values,
+                   label='Train adv_loss', color='green', linewidth=1.5)
+        ax.set_xlabel('Epoch')
+        ax.legend(loc='best', fontsize=8)
+        ax.grid(True, alpha=0.3)
         
         # Row 2: Validation mAP50
         ax = axes[2, col_idx]
@@ -167,28 +201,53 @@ def plot_individual_curves(experiments: dict[str, pd.DataFrame], save_dir: Path)
         
         epochs = df['epoch'].values
         
-        # 子图1: 域分类准确率（训练集 vs 验证集）
+        # 子图1: 域分类准确率（legacy）或域分数（GAN/WGAN-GP）
         ax = axes[0, 0]
+        has_domain_metric = False
         if 'metrics/domain_acc' in df.columns:
-            ax.plot(epochs, df['metrics/domain_acc'].values, 
+            ax.plot(epochs, df['metrics/domain_acc'].values,
                    label='Train', color='blue', linewidth=2, marker='o', markersize=3)
+            has_domain_metric = True
         if 'target_metrics/domain_acc' in df.columns:
-            ax.plot(epochs, df['target_metrics/domain_acc'].values, 
+            ax.plot(epochs, df['target_metrics/domain_acc'].values,
                    label='Val', color='red', linewidth=2, marker='s', markersize=3)
+            has_domain_metric = True
+        if 'train/source_scores' in df.columns:
+            ax.plot(epochs, df['train/source_scores'].values,
+                   label='Train Source', color='blue', linewidth=2, marker='o', markersize=3)
+            has_domain_metric = True
+        if 'train/target_scores' in df.columns:
+            ax.plot(epochs, df['train/target_scores'].values,
+                   label='Train Target', color='red', linewidth=2, marker='s', markersize=3)
+            has_domain_metric = True
+        if 'val/source_scores' in df.columns:
+            ax.plot(epochs, df['val/source_scores'].values,
+                   label='Val Source', color='cyan', linewidth=2, marker='^', markersize=3)
+            has_domain_metric = True
+        if 'val/target_scores' in df.columns:
+            ax.plot(epochs, df['val/target_scores'].values,
+                   label='Val Target', color='orange', linewidth=2, marker='v', markersize=3)
+            has_domain_metric = True
         ax.set_xlabel('Epoch', fontsize=11)
-        ax.set_ylabel('Domain Accuracy', fontsize=11)
-        ax.set_title('Domain Classification Accuracy', fontsize=12)
+        ax.set_title('Domain Metric', fontsize=12)
         ax.legend(loc='best')
         ax.grid(True, alpha=0.3)
-        ax.set_ylim([0, 1.05])
+        if 'metrics/domain_acc' in df.columns or 'target_metrics/domain_acc' in df.columns:
+            ax.set_ylabel('Domain Accuracy', fontsize=11)
+            ax.set_ylim([0, 1.05])
+        else:
+            ax.set_ylabel('Critic Score', fontsize=11)
         
         # 子图2: Domain Loss
         ax = axes[0, 1]
         if 'train/dom_loss' in df.columns:
-            ax.plot(epochs, df['train/dom_loss'].values, 
+            ax.plot(epochs, df['train/dom_loss'].values,
                    label='Train Domain Loss', color='green', linewidth=2, marker='o', markersize=3)
+        elif 'train/adv_loss' in df.columns:
+            ax.plot(epochs, df['train/adv_loss'].values,
+                   label='Train Adv Loss', color='green', linewidth=2, marker='o', markersize=3)
         if 'val/dom_loss' in df.columns:
-            ax.plot(epochs, df['val/dom_loss'].values, 
+            ax.plot(epochs, df['val/dom_loss'].values,
                    label='Val Domain Loss', color='orange', linewidth=2, marker='s', markersize=3)
         ax.set_xlabel('Epoch', fontsize=11)
         ax.set_ylabel('Domain Loss', fontsize=11)
@@ -215,8 +274,24 @@ def plot_individual_curves(experiments: dict[str, pd.DataFrame], save_dir: Path)
             ax.grid(True, alpha=0.3)
             ax.set_ylim([0, 1.05])
         
-        # 子图4: 不绘制（保持为空或隐藏）
-        axes[1, 1].axis('off')
+        # 子图4: 对于GAN模型绘制Source和Target分数差异（Wasserstein距离估计）
+        if 'train/source_scores' in df.columns and 'train/target_scores' in df.columns:
+            ax = axes[1, 1]
+            diff = df['train/target_scores'].values - df['train/source_scores'].values
+            ax.plot(epochs, diff,
+                   label='Train (Target - Source)', color='purple', linewidth=2, marker='o', markersize=3)
+            if 'val/source_scores' in df.columns and 'val/target_scores' in df.columns:
+                val_diff = df['val/target_scores'].values - df['val/source_scores'].values
+                ax.plot(epochs, val_diff,
+                       label='Val (Target - Source)', color='brown', linewidth=2, marker='s', markersize=3)
+            ax.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+            ax.set_xlabel('Epoch', fontsize=11)
+            ax.set_ylabel('Score Difference', fontsize=11)
+            ax.set_title('Domain Score Gap (Wasserstein Estimate)', fontsize=12)
+            ax.legend(loc='best')
+            ax.grid(True, alpha=0.3)
+        else:
+            axes[1, 1].axis('off')
         
         plt.tight_layout()
         
