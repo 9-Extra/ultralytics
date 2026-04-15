@@ -473,30 +473,9 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
         return self.metrics, self.fitness
 
-    def _train_discriminator(self, epoch, batch):
+    def _train_discriminator(self, epoch, all_features):
         """训练判别器（k次迭代）。"""
-
-        if not epoch >= self.epochs // 20:
-            # 等骨干网络稍微收敛再训练
-            return
-
-        # 提取特征（不计算梯度，保持生成器在 train 模式）
-        with torch.no_grad():
-            with autocast(self.amp):
-                source_features: list[torch.Tensor] = self.model(batch["img"])[
-                    "backbone_features"
-                ]
-                target_features: list[torch.Tensor] = self.model(batch["domain_img"])[
-                    "backbone_features"
-                ]
-                all_features = [
-                    torch.cat((s, t)) for s, t in zip(source_features, target_features)
-                ]
-                del source_features, target_features
-        pass
-
         # 训练判别器 k 次
-        # loss = []
         for _ in range(self.d_steps):
             self.d_optimizer.zero_grad()
 
@@ -510,20 +489,15 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                 loss_d = F.binary_cross_entropy_with_logits(
                     d_logits, d_labels, reduction="sum"
                 )
-                # loss.append(loss_d.item())
 
             self.d_scaler.scale(loss_d).backward()
             self.d_scaler.step(self.d_optimizer)
             self.d_scaler.update()
 
-        pass
-
-        # print(loss)
-
-    def _train_generator(self, epoch: int, batch):
+    def _train_generator(self, epoch: int, batch, source_preds, target_preds):
         """训练生成器，同时统计训练集域分类准确率。"""
-        source_preds = self.model(batch["img"])
-
+        
+        # Yolo原本的训练逻辑
         if self.args.compile:
             loss_det, loss_items = unwrap_model(self.model).loss(batch, source_preds)
         else:
@@ -531,19 +505,19 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
         if epoch >= self.epochs // 20:
             # 从1/20轮后再开始对抗训练
-            target_preds = self.model(batch["domain_img"])
-
-            d_logits: torch.Tensor = self.discriminator(target_preds["backbone_features"])
+            d_logits_target: torch.Tensor = self.discriminator(target_preds["backbone_features"])
             d_labels = torch.full_like(
-                d_logits, 0.1
+                d_logits_target, 0.1
             )  # 单侧标签平滑：对生成器，希望判别器将目标域特征归为源域（0.1）
 
             loss_adv = F.binary_cross_entropy_with_logits(
-                d_logits, d_labels, reduction="sum"
+                d_logits_target, d_labels, reduction="sum"
             )
 
             with torch.no_grad():
                 # 统计训练集上正确率（在GPU内累加，避免每batch同步）
+                d_logits_source = self.discriminator([f.detach() for f in source_preds["backbone_features"]])
+                d_logits = torch.cat([d_logits_source, d_logits_target])
                 d_source, d_target = d_logits.chunk(2)
                 source_correct = (d_source < 0).sum()
                 target_correct = (d_target >= 0).sum()
@@ -655,10 +629,19 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
                 batch = self.preprocess_batch(batch)
 
-                self._train_discriminator(epoch, batch)
+                with autocast(self.amp):
+                    source_preds = self.model(batch["img"])
+                    target_preds = self.model(batch["domain_img"])
+
+                if epoch >= self.epochs // 20:
+                    # 等骨干网络稍微收敛再训练
+                    source_features = [f.detach() for f in source_preds["backbone_features"]]
+                    target_features = [f.detach() for f in target_preds["backbone_features"]]
+                    all_features = [torch.cat((s, t)) for s, t in zip(source_features, target_features)]
+                    self._train_discriminator(epoch, all_features)
 
                 with autocast(self.amp):
-                    self.loss, self.loss_items = self._train_generator(epoch, batch)
+                    self.loss, self.loss_items = self._train_generator(epoch, batch, source_preds, target_preds)
 
                     if RANK != -1:
                         self.loss *= self.world_size
