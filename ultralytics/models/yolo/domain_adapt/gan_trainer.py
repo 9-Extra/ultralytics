@@ -534,6 +534,16 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
         return total_loss, loss_items
 
+    def _close_dataloader_mosaic(self):
+        """同步关闭源域和目标域数据加载器的 mosaic 增强。"""
+        super()._close_dataloader_mosaic()
+        if hasattr(self, "target_train_loader") and self.target_train_loader is not None:
+            if hasattr(self.target_train_loader.dataset, "mosaic"):
+                self.target_train_loader.dataset.mosaic = False
+            if hasattr(self.target_train_loader.dataset, "close_mosaic"):
+                self.target_train_loader.dataset.close_mosaic(hyp=copy(self.args))
+            LOGGER.info("目标域数据加载器 mosaic 已关闭")
+
     def _do_train(self):
         """执行GAN风格的训练循环。"""
         if self.world_size > 1:
@@ -721,7 +731,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                         **self.metrics,
                         **self.lr,
                         "train/domain_acc": train_domain_acc,
-                        "target_metrics/domain_acc": self.validator.domain_stats[
+                        "val/domain_acc": self.validator.domain_stats[
                             "accuracy"
                         ],
                     }

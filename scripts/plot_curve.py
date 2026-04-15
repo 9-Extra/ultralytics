@@ -48,7 +48,7 @@ def load_experiment_data(exp_path: Path) -> tuple[str, pd.DataFrame | None]:
 
 def is_domain_adaptation_exp(df: pd.DataFrame) -> bool:
     """检查是否为域适应实验（包含域适应特有的列）。"""
-    legacy_cols = ['train/dom_loss', 'metrics/domain_acc', 'target_metrics/domain_acc']
+    legacy_cols = ['train/domain_acc', 'val/domain_acc']
     gan_cols = ['train/source_scores', 'train/target_scores']
     return all(col in df.columns for col in legacy_cols) or all(col in df.columns for col in gan_cols)
 
@@ -71,7 +71,7 @@ def plot_domain_curves(experiments: dict[str, pd.DataFrame], save_dir: Path):
     }
     
     if not da_experiments:
-        print("警告: 未找到域适应实验（需要包含 train/dom_loss + metrics/domain_acc 或 train/source_scores + train/target_scores 等列）")
+        print("警告: 未找到域适应实验（需要包含 train/domain_acc + val/domain_acc 或 train/source_scores + train/target_scores 等列）")
         return
     
     print(f"找到 {len(da_experiments)} 个域适应实验: {list(da_experiments.keys())}")
@@ -82,7 +82,7 @@ def plot_domain_curves(experiments: dict[str, pd.DataFrame], save_dir: Path):
     fig, axes = plt.subplots(3, n_exps, figsize=(5 * n_exps, 12), squeeze=False)
     
     # 自适应行标题
-    has_legacy_da = any('metrics/domain_acc' in df.columns for df in da_experiments.values())
+    has_legacy_da = any('train/domain_acc' in df.columns for df in da_experiments.values())
     has_gan_da = any('train/source_scores' in df.columns for df in da_experiments.values())
     if has_gan_da and not has_legacy_da:
         domain_row_title = 'Domain Scores (Source vs Target)'
@@ -110,12 +110,12 @@ def plot_domain_curves(experiments: dict[str, pd.DataFrame], save_dir: Path):
         # Row 0: 域分类准确率（legacy）或域分数（GAN/WGAN-GP）
         ax = axes[0, col_idx]
         has_domain_metric = False
-        if 'metrics/domain_acc' in df.columns:
-            ax.plot(epochs, df['metrics/domain_acc'].values,
+        if 'train/domain_acc' in df.columns:
+            ax.plot(epochs, df['train/domain_acc'].values,
                    label='Train', color='blue', linewidth=1.5)
             has_domain_metric = True
-        if 'target_metrics/domain_acc' in df.columns:
-            ax.plot(epochs, df['target_metrics/domain_acc'].values,
+        if 'val/domain_acc' in df.columns:
+            ax.plot(epochs, df['val/domain_acc'].values,
                    label='Val', color='red', linewidth=1.5)
             has_domain_metric = True
         if 'train/source_scores' in df.columns:
@@ -138,7 +138,7 @@ def plot_domain_curves(experiments: dict[str, pd.DataFrame], save_dir: Path):
         if has_domain_metric:
             ax.legend(loc='best', fontsize=8)
             ax.grid(True, alpha=0.3)
-        if 'metrics/domain_acc' in df.columns or 'target_metrics/domain_acc' in df.columns:
+        if 'train/domain_acc' in df.columns or 'val/domain_acc' in df.columns:
             ax.set_ylim([0, 1.05])
         
         # Row 1: Domain Loss
