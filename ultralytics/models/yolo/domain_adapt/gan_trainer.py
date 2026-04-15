@@ -542,7 +542,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                 self.target_train_loader.dataset.mosaic = False
             if hasattr(self.target_train_loader.dataset, "close_mosaic"):
                 self.target_train_loader.dataset.close_mosaic(hyp=copy(self.args))
-            LOGGER.info("目标域数据加载器 mosaic 已关闭")
+                LOGGER.info("目标域数据加载器 mosaic 已关闭")
 
     def _do_train(self):
         """执行GAN风格的训练循环。"""
@@ -596,6 +596,8 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             if epoch == (self.epochs - self.args.close_mosaic):
                 self._close_dataloader_mosaic()
                 self.train_loader.reset()
+                self.target_train_loader.reset()
+                self.target_iter = iter(self.target_train_loader)
 
             pbar = enumerate(self.train_loader)
             if RANK in {-1, 0}:
