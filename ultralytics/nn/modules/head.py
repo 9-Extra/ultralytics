@@ -333,7 +333,7 @@ class DetectGRL(Detect):
         
         # 域分类器：对每层应用3次卷积（3x3, 3x3, 1x1，输出16通道）
         c_dom = min(ch[0] // 4, 16)  # 中间层通道数，ch可能是[64, 128, 256]
-        if True:
+        if False:
             # 简化头
             self.domain_cls = nn.ModuleList(
                 nn.Sequential(
@@ -349,17 +349,20 @@ class DetectGRL(Detect):
                 nn.Sequential(
                     GradientScalarLayer(-0.1),
                     ConvGN(x, c_dom, 3),
-                    ConvGN(c_dom, c_dom, 1, act=False),
+                    ConvGN(x, c_dom, 3),
+                    nn.Conv2d(c_dom, c_dom, 1, act=False),
                     nn.AdaptiveAvgPool2d(1),
-                    ConvGN(c_dom, c_dom, 1),
-                    ConvGN(c_dom, 16, 1),
                 )
                 for x in ch
             )
         
         # 融合层：1x1卷积，用于融合所有层的特征
         # 输入通道总数 = 16 * 层数，输出 = 1（二分类）
-        self.domain_fusion = nn.Conv2d(16 * self.nl, 1, 1)
+        self.domain_fusion = nn.Sequential(
+            ConvGN(c_dom * self.nl, c_dom, 1),
+            ConvGN(c_dom, c_dom, 1),
+            nn.Conv2d(c_dom, 1, 1)
+        )
     
     @property
     def grl_weight(self) -> float:
