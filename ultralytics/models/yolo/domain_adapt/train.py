@@ -566,6 +566,14 @@ class DomainAdaptationTrainer(BaseTrainer):
             if epoch == (self.epochs - self.args.close_mosaic):
                 self._close_dataloader_mosaic()
                 self.train_loader.reset()
+                # 同步关闭目标域数据加载器的 mosaic，确保源域和目标域预处理一致
+                if hasattr(self, "target_train_loader") and self.target_train_loader:
+                    if hasattr(self.target_train_loader.dataset, "mosaic"):
+                        self.target_train_loader.dataset.mosaic = False
+                    if hasattr(self.target_train_loader.dataset, "close_mosaic"):
+                        LOGGER.info("Closing target dataloader mosaic")
+                        self.target_train_loader.dataset.close_mosaic(hyp=copy(self.args))
+                    self.target_train_loader.reset()
 
             if RANK in {-1, 0}:
                 LOGGER.info(self.progress_string())
