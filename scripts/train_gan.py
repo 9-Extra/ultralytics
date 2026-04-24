@@ -98,6 +98,13 @@ def parse_args():
         default=256,
         help="判别器隐藏层维度 (默认: 256)",
     )
+    parser.add_argument(
+        "--discriminator-type",
+        type=str,
+        default="fusion",
+        choices=["fusion", "separate"],
+        help="判别器类型: fusion (多尺度融合输出, 默认) 或 separate (三独立分支输出)",
+    )
 
     # 其他配置
     parser.add_argument(
@@ -170,6 +177,7 @@ def main():
     print(f"  对抗损失初始权重: {args.lambda_start}")
     print(f"  对抗损失最终权重: {args.lambda_end}")
     print(f"  判别器隐藏层: {args.discriminator_hidden}")
+    print(f"  判别器类型: {args.discriminator_type}")
     print("-" * 70)
     print(f"生成器学习率: {args.lr0}")
     print(f"设备: {args.device}")
@@ -202,6 +210,7 @@ def main():
         "lambda_start": args.lambda_start,
         "lambda_end": args.lambda_end,
         "discriminator_hidden": args.discriminator_hidden,
+        "discriminator_type": args.discriminator_type,
         
         # 数据增强
         "scale": 0.2,

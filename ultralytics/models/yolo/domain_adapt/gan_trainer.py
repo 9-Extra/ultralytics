@@ -40,7 +40,29 @@ from ultralytics.utils.torch_utils import (
 from ultralytics.utils.tqdm import TQDM
 
 
-class DomainDiscriminator(nn.Module):
+class BaseDomainDiscriminator(nn.Module):
+    """域判别器基类，封装与输出维度无关的损失计算逻辑。"""
+
+    def loss_discriminate(self, d_logits: torch.Tensor) -> torch.Tensor:
+        """判别器损失：区分源域与目标域。
+
+        假设 d_logits 的前半 batch 为源域，后半为目标域。
+        对 (2B, 1) 和 (2B, 3) 均适用。
+        """
+        d_labels = torch.ones_like(d_logits)
+        d_labels[: d_logits.shape[0] // 2] = 0.1  # 单侧标签平滑：源域=0.1，目标域=1
+        return F.binary_cross_entropy_with_logits(d_logits, d_labels, reduction="sum")
+
+    def loss_adv(self, d_logits_target: torch.Tensor) -> torch.Tensor:
+        """生成器（对抗）损失：欺骗判别器。
+
+        假设输入全为目标域特征，希望判别器将其判为源域。
+        """
+        d_labels = torch.full_like(d_logits_target, 0.1)
+        return F.binary_cross_entropy_with_logits(d_logits_target, d_labels, reduction="sum")
+
+
+class DomainDiscriminator(BaseDomainDiscriminator):
     """独立域分类器（判别器）- 全卷积网络实现。
 
     接收YOLO骨干网络提取的多尺度特征，输出域分类预测。
@@ -134,11 +156,129 @@ class DomainDiscriminator(nn.Module):
         # 分类（1x1 卷积）
         logits_map = self.classifier(fused)  # (B, 1, H, W)
 
-        # 全局平均池化得到最终分类结果
-        logits = F.adaptive_avg_pool2d(logits_map, 1)  # (B, 1, 1, 1)
+        # 全局最大池化得到最终分类结果
+        logits = F.adaptive_max_pool2d(logits_map, 1)  # (B, 1, 1, 1)
         logits = logits.view(-1, 1)  # (B, 1)
 
         return logits
+
+
+class DomainDiscriminatorSeparate(BaseDomainDiscriminator):
+    """独立域分类器（判别器）- 多尺度独立分支版本。
+
+    接收YOLO骨干网络提取的多尺度特征，为每个尺度配备独立的域分类器。
+    完全由卷积层组成，支持任意空间尺寸的输入。
+    源域=0，目标域=1。
+
+    Architecture (per scale):
+        Input: Tensor - 单尺度特征 (B, C, H, W)
+        → Per-scale conv encoding (3x3 + 1x1 conv)
+        → Spatial fusion layers (1x1 conv)
+        → Global average pooling
+        → Output: (B, 1) domain logits
+
+    Final Output:
+        Concatenate 3 independent classifier outputs → (B, 3)
+    """
+
+    def __init__(
+        self,
+        ch: tuple = (256, 512, 1024),
+        hidden_dim: int = 256,
+        scale_weights: tuple = (1.0, 0.5, 0.25),
+    ):
+        """
+        Args:
+            ch: 输入特征通道数列表，对应多尺度特征（3层）
+            hidden_dim: 每个独立分支的隐藏层维度
+            scale_weights: 各尺度损失的权重系数，大尺度（高分辨率）对应更高权重
+        """
+        super().__init__()
+        self.nl = len(ch)  # 特征层数，应为3
+        self.hidden_dim = hidden_dim
+        self.scale_weights = scale_weights
+        assert self.nl == 3, f"DomainDiscriminatorSeparate 期望3层输入，得到 {self.nl} 层"
+        assert len(scale_weights) == self.nl, (
+            f"scale_weights 长度 {len(scale_weights)} 与特征层数 {self.nl} 不一致"
+        )
+
+        # 注册为 buffer，自动随模型移动到对应 device
+        self.register_buffer(
+            "scale_weights_tensor",
+            torch.tensor(scale_weights, dtype=torch.float32).view(1, -1),
+        )
+
+        # 为每个尺度构建独立的分支
+        self.branches = nn.ModuleList()
+        for i, c in enumerate(ch):
+            branch = nn.Sequential(
+                # 编码器
+                nn.Conv2d(c, hidden_dim, 3, 1, 1),
+                nn.ReLU(inplace=True),
+                nn.InstanceNorm2d(hidden_dim, affine=True),
+                nn.Conv2d(hidden_dim, hidden_dim, 1),
+                nn.ReLU(inplace=True),
+                # 融合层
+                nn.Conv2d(hidden_dim, hidden_dim // 2, 3, 1, 1),
+                nn.ReLU(inplace=True),
+                nn.InstanceNorm2d(hidden_dim // 2, affine=True),
+                nn.Conv2d(hidden_dim // 2, hidden_dim // 2, 1, 1),
+                nn.ReLU(inplace=True),
+                # 分类头（1x1卷积，输出单通道logit map）
+                nn.Conv2d(hidden_dim // 2, 1, 1, 1, 0),
+            )
+            self.branches.append(branch)
+
+    def forward(self, features: list[torch.Tensor]) -> torch.Tensor:
+        """前向传播 - 每个尺度独立处理，最终拼接输出。
+
+        Args:
+            features: 多尺度特征列表，长度为3，每个元素形状为 (B, C, H, W)
+
+        Returns:
+            域分类logits，形状为 (B, 3)，每列对应一个尺度的独立预测
+        """
+        assert len(features) == self.nl, (
+            f"输入特征层数 {len(features)} 与期望的 {self.nl} 不一致"
+        )
+
+        logits_list = []
+        for i, feat in enumerate(features):
+            # 独立分支处理该尺度特征
+            logit_map = self.branches[i](feat)  # (B, 1, H, W)
+            # 全局最大池化得到 (B, 1)
+            logit = F.adaptive_max_pool2d(logit_map, 1).view(-1, 1)
+            logits_list.append(logit)
+
+        # 拼接三个独立分类器的输出: (B, 3)
+        return torch.cat(logits_list, dim=1)
+
+    def _apply_scale_weights(self, loss_per_element: torch.Tensor) -> torch.Tensor:
+        """对逐元素损失按尺度加权后求和。
+
+        Args:
+            loss_per_element: 形状为 (B, 3) 的逐元素 BCE 损失
+
+        Returns:
+            加权后的标量损失
+        """
+        weighted = loss_per_element * self.scale_weights_tensor
+        return weighted.sum()
+
+    def loss_discriminate(self, d_logits: torch.Tensor) -> torch.Tensor:
+        d_labels = torch.ones_like(d_logits)
+        d_labels[: d_logits.shape[0] // 2] = 0.1
+        loss_per_element = F.binary_cross_entropy_with_logits(
+            d_logits, d_labels, reduction="none"
+        )
+        return self._apply_scale_weights(loss_per_element)
+
+    def loss_adv(self, d_logits_target: torch.Tensor) -> torch.Tensor:
+        d_labels = torch.full_like(d_logits_target, 0.1)
+        loss_per_element = F.binary_cross_entropy_with_logits(
+            d_logits_target, d_labels, reduction="none"
+        )
+        return self._apply_scale_weights(loss_per_element)
 
 
 class GANDomainAdaptationTrainer(BaseTrainer):
@@ -170,6 +310,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
                 "lambda_end",
                 "discriminator_hidden",
                 "discriminator_ch",
+                "discriminator_type",
             ]
             for key in gan_keys:
                 if key in overrides:
@@ -184,6 +325,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
         self.lambda_end = gan_params.get("lambda_end", 0.002)
         self.lambda_adv = self.lambda_start
         self.discriminator_hidden = gan_params.get("discriminator_hidden", 256)
+        self.discriminator_type = gan_params.get("discriminator_type", "fusion")  # "fusion" | "separate"
 
         # 待初始化
         self.discriminator = None
@@ -207,9 +349,16 @@ class GANDomainAdaptationTrainer(BaseTrainer):
             self.discriminator_ch = actual_ch
             LOGGER.info(f"自动检测判别器输入通道: {self.discriminator_ch}")
 
-        self.discriminator = DomainDiscriminator(
-            ch=self.discriminator_ch, hidden_dim=self.discriminator_hidden
-        )
+        if self.discriminator_type == "separate":
+            self.discriminator = DomainDiscriminatorSeparate(
+                ch=self.discriminator_ch, hidden_dim=self.discriminator_hidden
+            )
+            LOGGER.info(f"使用独立分支域判别器: DomainDiscriminatorSeparate")
+        else:
+            self.discriminator = DomainDiscriminator(
+                ch=self.discriminator_ch, hidden_dim=self.discriminator_hidden
+            )
+            LOGGER.info(f"使用融合域判别器: DomainDiscriminator")
 
         if self.args.compile:
             self.discriminator = attempt_compile(self.discriminator, self.device)
@@ -220,11 +369,6 @@ class GANDomainAdaptationTrainer(BaseTrainer):
         self.d_optimizer = torch.optim.AdamW(
             self.discriminator.parameters(), lr=self.d_lr / 10, betas=(0.9, 0.999)
         )
-
-        # self.d_optimizer = torch.optim.SGD(
-        #     self.discriminator.parameters(),
-        #     lr=self.d_lr
-        # )
 
         # 判别器独立的 GradScaler
         self.d_scaler = GradScaler("cuda", enabled=self.amp)
@@ -485,14 +629,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
 
             with autocast(self.amp):
                 d_logits: torch.Tensor = self.discriminator(all_features)
-
-                # 源域标签=0，目标域标签=1
-                d_labels = torch.ones_like(d_logits)
-                d_labels[: d_labels.shape[0] // 2] = 0.1  # 单侧标签平滑：源域=0.1，目标域=1
-
-                loss_d = F.binary_cross_entropy_with_logits(
-                    d_logits, d_labels, reduction="sum"
-                )
+                loss_d = self.discriminator.loss_discriminate(d_logits)
 
             self.d_scaler.scale(loss_d).backward()
             self.d_scaler.step(self.d_optimizer)
@@ -510,13 +647,7 @@ class GANDomainAdaptationTrainer(BaseTrainer):
         if epoch >= self.epochs // 20:
             # 从1/20轮后再开始对抗训练
             d_logits_target: torch.Tensor = self.discriminator(target_preds["backbone_features"])
-            d_labels = torch.full_like(
-                d_logits_target, 0.1
-            )  # 单侧标签平滑：对生成器，希望判别器将目标域特征归为源域（0.1）
-
-            loss_adv = F.binary_cross_entropy_with_logits(
-                d_logits_target, d_labels, reduction="sum"
-            )
+            loss_adv = self.discriminator.loss_adv(d_logits_target)
 
             with torch.no_grad():
                 # 统计训练集上正确率（在GPU内累加，避免每batch同步）
